@@ -34,6 +34,9 @@ CPU_TIER = STTTier(model="small.en", device="cpu", compute_type="int8")
 
 HOTWORDS = "Claude, Claude Code"
 
+_CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
+_CUDA_DLL_DIRECTORIES: set[str] = set()
+
 
 class STTError(RuntimeError):
     """Raised when transcription cannot proceed."""
@@ -49,14 +52,34 @@ def models_dir() -> Path:
 def _preload_cuda_libraries() -> None:
     """Make the pip-shipped CUDA runtime visible to CTranslate2.
 
-    The nvidia-cublas/nvidia-cudnn wheels install shared objects outside the
-    loader's default search path; loading them RTLD_GLOBAL up front lets
-    CTranslate2 resolve them without any LD_LIBRARY_PATH ceremony.
+    The nvidia-cublas/nvidia-cudnn wheels install libraries outside the
+    loader's default search path. Register their bin directories on Windows,
+    or load their shared objects RTLD_GLOBAL on POSIX.
     """
     try:
         import nvidia
     except ImportError:
         return
+
+    if os.name == "nt":
+        registered: list[str] = []
+        for package_path in nvidia.__path__:
+            for bin_dir in sorted(glob.glob(os.path.join(package_path, "*", "bin"))):
+                directory = os.path.abspath(bin_dir)
+                if directory in _CUDA_DLL_DIRECTORIES:
+                    continue
+                try:
+                    handle = os.add_dll_directory(directory)
+                except OSError:
+                    continue
+                _CUDA_DLL_DIRECTORIES.add(directory)
+                _CUDA_DLL_DIRECTORY_HANDLES.append(handle)
+                registered.append(directory)
+        if registered:
+            current_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = os.pathsep.join([*registered, current_path])
+        return
+
     for package_path in nvidia.__path__:
         for lib_dir in sorted(glob.glob(os.path.join(package_path, "*", "lib"))):
             for shared_object in sorted(glob.glob(os.path.join(lib_dir, "*.so*"))):
@@ -80,6 +103,8 @@ def cuda_available() -> bool:
 
 def detect_tier(device: str = "auto", model: str | None = None) -> STTTier:
     """Resolve the active tier (D-1): auto-detected, with a manual override."""
+    if device in {"auto", "cuda"}:
+        _preload_cuda_libraries()
     if device == "auto":
         tier = GPU_TIER if cuda_available() else CPU_TIER
     elif device == "cuda":
