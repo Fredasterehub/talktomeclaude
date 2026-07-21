@@ -1,0 +1,51 @@
+"""Tests for the barge-in and default-voice configuration settings."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from talktomeclaude import config
+
+
+class ConfigSettingsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = mock.patch.dict(
+            os.environ, {"CLAUDE_PLUGIN_DATA": self.tmp.name}, clear=False
+        )
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def test_barge_in_defaults_off_and_round_trips(self) -> None:
+        self.assertFalse(config.barge_in_enabled())
+        config.set_barge_in(True)
+        self.assertTrue(config.barge_in_enabled())
+        config.set_barge_in(False)
+        self.assertFalse(config.barge_in_enabled())
+
+    def test_default_voice_none_until_set_then_clears(self) -> None:
+        self.assertIsNone(config.default_voice_name())
+        config.set_default_voice("  rick  ")
+        self.assertEqual(config.default_voice_name(), "rick")  # trimmed
+        config.set_default_voice(None)
+        self.assertIsNone(config.default_voice_name())
+        config.set_default_voice("gimli")
+        config.set_default_voice("")  # empty clears to auto-select
+        self.assertIsNone(config.default_voice_name())
+
+    def test_settings_are_independent(self) -> None:
+        config.set_default_voice("rick")
+        config.set_barge_in(True)
+        self.assertEqual(config.default_voice_name(), "rick")
+        self.assertTrue(config.barge_in_enabled())
+        # Existing settings remain untouched.
+        self.assertTrue(config.voice_assist_enabled())
+
+
+if __name__ == "__main__":
+    unittest.main()
