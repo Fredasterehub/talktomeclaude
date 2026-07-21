@@ -81,24 +81,27 @@ all_local:
   setup: "default; no extra config. Just `talktomeclaude listen`."
 remote_ssh:
   desc: "voice on the machine you sit at; Claude Code runs on a server (e.g. SSH into Proxmox/VPS). Server needs NO audio; client needs NO Claude Code."
-  how: "mic capture + STT + spoken reply stay local; only text crosses SSH (multiplexed connection). claude runs on the server via `ssh user@host bash -lc 'claude -p ...'`."
+  how: "mic capture + STT + spoken reply stay local; only text crosses SSH. POSIX clients use a multiplexed connection; native Windows omits unsupported Unix control-socket options. claude runs on the server via a login shell."
   setup:
     - "server: install + log into Claude Code (claude --version works)."
     - "client: install talktomeclaude; set up passwordless SSH keys to the server (required, or it prompts every utterance)."
     - "client: talktomeclaude config set remote user@host   # persist once"
-    - "client: talktomeclaude listen                        # or per-run: listen --remote user@host"
+    - "client: talktomeclaude config set remote-cwd /srv/project   # optional; remote project directory"
+    - "client: talktomeclaude listen   # per-run overrides: listen --remote user@host --remote-cwd /srv/project"
   revert: "talktomeclaude config set remote local"
+  clear_project_dir: "talktomeclaude config set remote-cwd home"
 ```
 
 ## USAGE
 ```yaml
 commands:
   speak:      'talktomeclaude speak "text" [--out file.wav] [--voice NAME]'
-  listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--remote user@host] [--once]'
+  listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--remote user@host] [--remote-cwd PATH] [--once]'
   transcribe: 'talktomeclaude transcribe AUDIO [--device auto|cuda|cpu] [--show-tier]'
   filter:     'talktomeclaude filter transcript.jsonl'   # prints only spoken dialogue (never code/tools)
   voices:     'talktomeclaude voices [--download]'       # list voices + licenses; --download pre-fetches all
-  config:     'talktomeclaude config set|get recording-mode|voice-assist|remote VALUE'
+  config_set: 'talktomeclaude config set recording-mode|voice-assist|remote|remote-cwd VALUE'
+  config_get: 'talktomeclaude config get recording-mode|voice-assist|remote|remote-cwd'
   assist:     'talktomeclaude assist on|off|status'
 default_recording_mode: push-to-talk
 ```
@@ -119,6 +122,8 @@ available:
 windows_stop_hook:
   problem: "The Stop hook is a bash .sh script; native Windows may not execute it (can open it in an editor)."
   fix: "Install Git for Windows (winget install --id Git.Git -e) so Claude Code routes hooks through Git Bash. The CLI (speak/listen/transcribe/voices) works regardless; only the auto-speak hook needs Git Bash."
+windows_terminal_and_ssh:
+  note: "Native Windows listen uses stdlib msvcrt for push-to-talk/push-toggle; always-on needs no console key API. Windows OpenSSH runs without Unix ControlMaster/ControlPath/ControlPersist options; POSIX keeps multiplexing."
 macos_microphone:
   problem: "First use of listen/recording: macOS asks Terminal for Microphone access; without it the mic returns silence."
   fix: "Allow it (System Settings > Privacy & Security > Microphone > enable Terminal). speak needs no mic."

@@ -214,6 +214,12 @@ def filter_command(transcript) -> None:
     "`config set remote user@host`. Needs passwordless SSH keys and the claude CLI on the remote.",
 )
 @click.option(
+    "--remote-cwd",
+    default=None,
+    help="Start remote Claude Code in this project directory for this run; "
+    "defaults to the persisted remote-cwd setting.",
+)
+@click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
     default="auto",
@@ -232,6 +238,7 @@ def listen(
     session_id: str | None,
     tmux_pane: str | None,
     remote: str | None,
+    remote_cwd: str | None,
     device: str,
     model_name: str | None,
     once: bool,
@@ -260,6 +267,11 @@ def listen(
 
     active_mode = mode or config.recording_mode()
     active_remote = remote or config.remote()
+    if remote_cwd is not None and not active_remote:
+        raise click.ClickException("--remote-cwd requires --remote or a persisted remote")
+    active_remote_cwd = (
+        remote_cwd if remote_cwd is not None else config.remote_cwd()
+    ) if active_remote else None
 
     def speak_reply(text: str) -> None:
         if not config.voice_assist_enabled():
@@ -287,6 +299,7 @@ def listen(
             speak=speak_reply,
             status=lambda message: click.echo(message, err=True),
             remote=active_remote,
+            remote_cwd=active_remote_cwd,
         )
     except ListenError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -306,7 +319,8 @@ def config_set(key: str, value: str) -> None:
     """Persist KEY = VALUE.
 
     Known keys: recording-mode (always-on, push-to-talk, push-toggle),
-    voice-assist (on, off), and remote (user@host, or "local"/"none" to clear).
+    voice-assist (on, off), remote (user@host, or "local"/"none" to clear),
+    and remote-cwd (remote project path, or "home"/"none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -323,9 +337,13 @@ def config_set(key: str, value: str) -> None:
         settings.set_voice_assist(value == "on")
     elif key == "remote":
         settings.set_remote(None if value.lower() in ("", "local", "none", "off") else value)
+    elif key == "remote-cwd":
+        settings.set_remote_cwd(
+            None if value.lower() in ("", "home", "none", "off") else value
+        )
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, or remote"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, or remote-cwd"
         )
     click.echo(f"{key} = {value}")
 
@@ -342,9 +360,11 @@ def config_get(key: str) -> None:
         click.echo("on" if settings.voice_assist_enabled() else "off")
     elif key == "remote":
         click.echo(settings.remote() or "local")
+    elif key == "remote-cwd":
+        click.echo(settings.remote_cwd() or "home")
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, or remote"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, or remote-cwd"
         )
 
 

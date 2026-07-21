@@ -44,7 +44,7 @@ recording modes. One local command.
 - **Hear you** — local speech-to-text, Whisper-class (faster-whisper). Your voice never leaves the machine.
 - **Answer back** — speaks Claude's actual dialogue in a real voice, and *only* the dialogue. Tool calls, fenced code, and thinking are stripped out.
 - **Ride Claude Code** — a plugin Stop hook speaks each reply automatically. Async, non-blocking, fails silent.
-- **Three recording modes** — `always-on` (hands-free, pause-gated), `push-to-talk` (hold a key), `push-toggle` (tap to start, tap to send).
+- **Three recording modes, cross-platform** — `always-on` (hands-free, pause-gated), `push-to-talk` (hold a key), and `push-toggle` (tap to start, tap to send) work in native Windows Terminal and POSIX terminals without an extra keyboard package.
 - **A real mute** — `assist off` and the whole thing goes quiet, hook included.
 - **Ship silent-proof** — three public-domain voices, fetched automatically on first use, so day one is never a robot.
 
@@ -270,10 +270,16 @@ the server; only text goes over SSH. Here's the whole thing, top to bottom.
    ```
    *(Replace `you@192.168.2.122` with your server login and IP.)*
 
-4. **Tell talktomeclaude where the server is** — just once; it's remembered:
+4. **Tell talktomeclaude where the server and project are** — just once; both
+   settings are remembered. `remote-cwd` is the directory on the **server** in
+   which `claude -p` should start:
    ```bash
    talktomeclaude config set remote you@192.168.2.122
+   talktomeclaude config set remote-cwd /srv/projects/my-project
    ```
+   If you omit `remote-cwd`, Claude starts in the remote login account's home
+   directory as before. Paths with spaces or shell punctuation are safely
+   quoted by talktomeclaude.
 
 5. **Talk.** From your computer:
    ```bash
@@ -282,12 +288,20 @@ the server; only text goes over SSH. Here's the whole thing, top to bottom.
    Your mic is captured and transcribed **on your computer**, the text is sent to
    Claude Code **on the server**, and Claude's reply is spoken back through **your
    speakers**. (Prefer not to persist it? Skip step 4 and run
-   `talktomeclaude listen --remote you@192.168.2.122` instead.)
+   `talktomeclaude listen --remote you@192.168.2.122 --remote-cwd /srv/projects/my-project`
+   instead.)
+
+On Windows, talktomeclaude uses the native `msvcrt` console API for
+`push-to-talk` and `push-toggle`. SSH connection multiplexing remains enabled
+on macOS/Linux; native Windows omits Unix-only OpenSSH control-socket options
+for compatibility.
 
 **To switch back to all-local** (mic + Claude + speakers on one machine):
 ```bash
 talktomeclaude config set remote local
 ```
+To forget the saved project directory too, run
+`talktomeclaude config set remote-cwd home`.
 
 > Two things the server needs: Claude Code **logged in**, and the `claude` command
 > reachable from a non-interactive SSH shell (it's run through a login shell, so a
@@ -301,11 +315,11 @@ talktomeclaude config set remote local
 | Command | What it does |
 |---|---|
 | `speak "text"` | Synthesize and play a line locally. `--out file.wav` writes instead of plays; `--voice NAME` picks a voice. |
-| `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--tmux-pane` to type into a live TUI. |
+| `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--remote-cwd PATH` to select its project directory, `--tmux-pane` to type into a live TUI. |
 | `transcribe FILE` | Local speech-to-text on an audio file. `--device auto\|cuda\|cpu`, `--show-tier` to see which model runs. |
 | `filter TRANSCRIPT.jsonl` | Print only Claude's spoken dialogue from a transcript (`-` for stdin) — the core "dialogue, never code" filter. |
 | `voices` | List the voices, their licenses, and which is the default for your hardware. `--download` pre-fetches them all. |
-| `config set\|get KEY VALUE` | Persist settings. Keys: `recording-mode`, `voice-assist`, `remote` (`user@host`, or `local` to clear). |
+| `config set KEY VALUE` / `config get KEY` | Persist or read settings. Keys: `recording-mode`, `voice-assist`, `remote` (`user@host`, or `local` to clear), `remote-cwd` (server path, or `home` to clear). |
 | `assist on\|off\|status` | The full mute switch. `off` silences the Stop hook and all spoken replies. |
 
 **Recording modes** — set your default once:
