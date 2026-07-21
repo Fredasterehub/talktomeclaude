@@ -35,3 +35,9 @@ assets/*.datauri.txt
 # under ~/.cache/talktomeclaude/voices — never committed. A local voices/ dir is
 # honored first for offline use, but stays out of git (keeps the clone small).
 voices/
+
+# personal voice reference clips (copyrighted sources; never distribute/commit)
+voice-refs/
+
+# internal session handoff notes (not for the public repo)
+HANDOFF.md
