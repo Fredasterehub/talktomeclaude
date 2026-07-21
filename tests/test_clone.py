@@ -54,11 +54,11 @@ class CloneModelFreeTests(unittest.TestCase):
             out = Path(directory) / "o.wav"
             tone = np.sin(np.linspace(0, 6.28, 24000)).astype("float32")
             clone._write_wav(out, tone, 24000)
-            reader = wave.open(str(out))
-            self.assertEqual(reader.getframerate(), 24000)
-            self.assertEqual(reader.getnchannels(), 1)
-            self.assertEqual(reader.getsampwidth(), 2)
-            self.assertEqual(reader.getnframes(), 24000)
+            with wave.open(str(out)) as reader:
+                self.assertEqual(reader.getframerate(), 24000)
+                self.assertEqual(reader.getnchannels(), 1)
+                self.assertEqual(reader.getsampwidth(), 2)
+                self.assertEqual(reader.getnframes(), 24000)
             self.assertEqual(out.read_bytes()[:4], b"RIFF")
 
     def test_write_wav_rejects_empty_audio(self) -> None:

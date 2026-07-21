@@ -65,10 +65,10 @@ class WizardTests(unittest.TestCase):
         with mock.patch.dict(sys.modules, {"sounddevice": fake_sd}):
             result = wizard.record_reference(out, seconds=1.0, sample_rate=24000)
         self.assertEqual(result, out)
-        reader = wave.open(str(out))
-        self.assertEqual(reader.getframerate(), 24000)
-        self.assertEqual(reader.getnframes(), 24000)
-        self.assertEqual(reader.getnchannels(), 1)
+        with wave.open(str(out)) as reader:
+            self.assertEqual(reader.getframerate(), 24000)
+            self.assertEqual(reader.getnframes(), 24000)
+            self.assertEqual(reader.getnchannels(), 1)
         fake_sd.wait.assert_called_once()
 
     def test_record_reference_rejects_nonpositive_length(self) -> None:
