@@ -32,15 +32,21 @@ def main() -> None:
     "--voice",
     "voice_name",
     default=None,
-    help="Bundled voice to use (see the voices command); defaults to the best tier the hardware carries.",
+    help="Voice to use — any bundled, bring-your-own Piper, or cloned voice (see `voices`); "
+    "defaults to the best bundled tier the hardware carries.",
 )
 def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
-    """Synthesize TEXT to speech, fully locally, via the Piper engine."""
+    """Synthesize TEXT to speech, fully locally.
+
+    Piper voices run through the piper subprocess; a cloned voice (see
+    `voice create`) renders through the optional cloning engine.
+    """
     playback = out_path is None
     if playback:
         import tempfile
 
         out_path = Path(tempfile.mkstemp(prefix="talktomeclaude-", suffix=".wav")[1])
+    voice_name = _resolve_default_voice(voice_name)
     try:
         voice = synthesize(
             text, out_path, voice_name, on_status=lambda message: click.echo(message, err=True)
@@ -75,19 +81,49 @@ def _play_wav(path: Path) -> None:
         sounddevice.play(samples, samplerate=wav.getframerate(), blocking=True)
 
 
-@main.command()
+def _resolve_default_voice(explicit: str | None) -> str | None:
+    """Which voice speak/listen should use: an explicit --voice wins, else the
+    persisted default-voice (falling back to the auto default, with a warning,
+    if it no longer resolves). The Stop hook deliberately does NOT call this — it
+    stays on the bundled Piper default so it never loads a clone every turn.
+    """
+    if explicit:
+        return explicit
+    from talktomeclaude import config as settings
+
+    name = settings.default_voice_name()
+    if not name:
+        return None
+    from talktomeclaude.tts import TTSError, get_voice
+
+    try:
+        get_voice(name)
+    except TTSError:
+        click.echo(f"default voice {name!r} is unavailable; using the auto default", err=True)
+        return None
+    return name
+
+
+@main.group(invoke_without_command=True)
 @click.option(
     "--download",
     is_flag=True,
-    help="Fetch all voices into the local cache now, instead of on first use.",
+    help="Fetch all bundled voices into the local cache now, instead of on first use.",
 )
-def voices(download: bool) -> None:
-    """List the available voices and their licenses.
+@click.pass_context
+def voices(ctx: click.Context, download: bool) -> None:
+    """List available voices, or manage your own.
 
-    Voices are fetched from the Hugging Face Hub on first use and cached
-    locally; run with --download to pre-fetch them all up front.
+    Bundled voices are fetched from the Hugging Face Hub on first use and cached
+    locally; run `voices --download` to pre-fetch them. Bring your own Piper
+    voice with `voices add`, remove one with `voices remove`, or create a cloned
+    voice with `voice create`.
     """
-    from talktomeclaude.tts import cache_voices_dir, is_available, voice_files
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from talktomeclaude import registry
+    from talktomeclaude.tts import cache_voices_dir, voice_files
 
     directory = voices_dir()
     cache = cache_voices_dir()
@@ -106,16 +142,147 @@ def voices(download: bool) -> None:
     default = default_voice(directory)
     for voice in BUNDLED_VOICES:
         if voice.is_installed(directory):
-            status = "bundled"
+            state = "bundled"
         elif voice.is_installed(cache):
-            status = "cached"
+            state = "cached"
         else:
-            status = "on-demand"
+            state = "on-demand"
         marker = "  (default)" if voice.name == default.name else ""
         click.echo(
-            f"{voice.name}  [{voice.language}, {voice.quality}, {status}]  "
+            f"{voice.name}  [{voice.language}, {voice.quality}, {state}]  "
             f"license: {voice.license}  ({voice.provenance}){marker}"
         )
+    for voice in registry.list_voices():
+        click.echo(
+            f"{voice.name}  [{voice.language or '—'}, {voice.engine}, registered]  "
+            f"license: {voice.license}  ({voice.provenance})"
+        )
+
+
+@voices.command("add")
+@click.argument("name")
+@click.argument("model", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to the voice's .onnx.json config (defaults to alongside the .onnx).",
+)
+@click.option("--language", default="", help="Language tag for the voice (informational).")
+def voices_add(name: str, model: Path, config_path: Path | None, language: str) -> None:
+    """Register your own Piper voice NAME from a MODEL .onnx file."""
+    from talktomeclaude import registry
+
+    try:
+        voice = registry.add_piper(name, model, config_path, language=language)
+    except registry.RegistryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f'registered Piper voice {voice.name!r}  (use: speak --voice {voice.name} "...")')
+
+
+@voices.command("remove")
+@click.argument("name")
+def voices_remove(name: str) -> None:
+    """Remove a registered voice NAME (bundled voices cannot be removed)."""
+    from talktomeclaude import registry
+
+    try:
+        registry.remove(name)
+    except registry.RegistryError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"removed voice {name!r}")
+
+
+@main.command()
+def doctor() -> None:
+    """Inspect this machine and recommend STT/TTS tiers and cloning setup."""
+    from talktomeclaude.advisor import format_report
+
+    click.echo(format_report())
+
+
+@main.group()
+def voice() -> None:
+    """Create your own voices (cloning)."""
+
+
+@voice.command("create")
+@click.argument("name")
+@click.option(
+    "--reference",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Existing reference clip to clone from (~10-20s clean, single-speaker).",
+)
+@click.option(
+    "--record",
+    "record_seconds",
+    type=float,
+    default=None,
+    help="Capture a reference clip from the microphone for this many seconds instead.",
+)
+@click.option(
+    "--sample/--no-sample",
+    "want_sample",
+    default=True,
+    help="Render a short test sample after registering (needs the cloning engine).",
+)
+@click.option("--sample-text", default=None, help="Text for the test sample.")
+@click.option("--play", is_flag=True, help="Play the test sample after rendering.")
+@click.option("--set-default", is_flag=True, help="Make this the default voice for speak/listen.")
+def voice_create(
+    name: str,
+    reference: Path | None,
+    record_seconds: float | None,
+    want_sample: bool,
+    sample_text: str | None,
+    play: bool,
+    set_default: bool,
+) -> None:
+    """Create a cloned voice NAME from a reference clip.
+
+    Provide --reference PATH, or --record SECONDS to capture from the mic. A
+    short test sample is rendered when the cloning engine is installed (run
+    `doctor` for the install recipe); the voice registers either way.
+    """
+    import tempfile
+
+    from talktomeclaude import config as settings
+    from talktomeclaude import registry, wizard
+
+    if (reference is None) == (record_seconds is None):
+        raise click.ClickException("provide exactly one of --reference PATH or --record SECONDS")
+
+    status = lambda message: click.echo(message, err=True)
+    capture: Path | None = None
+    if record_seconds is not None:
+        capture = Path(tempfile.mkstemp(prefix=f"ttmc-ref-{name}-", suffix=".wav")[1])
+        try:
+            reference = wizard.record_reference(capture, seconds=record_seconds, on_status=status)
+        except wizard.WizardError as exc:
+            capture.unlink(missing_ok=True)
+            raise click.ClickException(str(exc)) from exc
+
+    text = (sample_text or wizard.DEFAULT_SAMPLE_TEXT) if want_sample else None
+    try:
+        created, sample = wizard.create_clone_voice(
+            name, reference, sample_text=text, on_status=status
+        )
+    except (registry.RegistryError, wizard.WizardError, TTSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        if capture is not None:
+            capture.unlink(missing_ok=True)
+
+    click.echo(f"created cloned voice {created.name!r}")
+    if sample is not None:
+        click.echo(f"test sample: {sample}")
+        if play:
+            _play_wav(sample)
+    if set_default:
+        settings.set_default_voice(name)
+        click.echo(f"default voice set to {name!r}")
 
 
 @main.command()
@@ -273,6 +440,8 @@ def listen(
         remote_cwd if remote_cwd is not None else config.remote_cwd()
     ) if active_remote else None
 
+    reply_voice = _resolve_default_voice(None)
+
     def speak_reply(text: str) -> None:
         if not config.voice_assist_enabled():
             return
@@ -280,7 +449,7 @@ def listen(
 
         wav_path = Path(tempfile.mkstemp(prefix="talktomeclaude-listen-", suffix=".wav")[1])
         try:
-            synthesize(text, wav_path, None)
+            synthesize(text, wav_path, reply_voice)
             _play_wav(wav_path)
         except (TTSError, click.ClickException):
             pass
@@ -320,7 +489,8 @@ def config_set(key: str, value: str) -> None:
 
     Known keys: recording-mode (always-on, push-to-talk, push-toggle),
     voice-assist (on, off), remote (user@host, or "local"/"none" to clear),
-    and remote-cwd (remote project path, or "home"/"none" to clear).
+    remote-cwd (remote project path, or "home"/"none" to clear),
+    barge-in (on, off), and default-voice (a voice name, or "auto"/"none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -341,9 +511,20 @@ def config_set(key: str, value: str) -> None:
         settings.set_remote_cwd(
             None if value.lower() in ("", "home", "none", "off") else value
         )
+    elif key == "barge-in":
+        if value not in ("on", "off"):
+            raise click.ClickException(
+                f"invalid barge-in value {value!r}: expected on or off"
+            )
+        settings.set_barge_in(value == "on")
+    elif key == "default-voice":
+        settings.set_default_voice(
+            None if value.lower() in ("", "auto", "none", "default") else value
+        )
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, or remote-cwd"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
+            "remote-cwd, barge-in, or default-voice"
         )
     click.echo(f"{key} = {value}")
 
@@ -362,9 +543,14 @@ def config_get(key: str) -> None:
         click.echo(settings.remote() or "local")
     elif key == "remote-cwd":
         click.echo(settings.remote_cwd() or "home")
+    elif key == "barge-in":
+        click.echo("on" if settings.barge_in_enabled() else "off")
+    elif key == "default-voice":
+        click.echo(settings.default_voice_name() or "auto")
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, or remote-cwd"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
+            "remote-cwd, barge-in, or default-voice"
         )
 
 
