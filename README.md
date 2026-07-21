@@ -387,3 +387,7 @@ https://raw.githubusercontent.com/Fredasterehub/talktomeclaude/main/llms.txt
 
 MIT. See [LICENSE](LICENSE). The bundled voices are public domain; Piper is
 invoked as a subprocess and never linked in.
+
+---
+
+*Powered & created with [Kiln](https://github.com/Fredasterehub/kiln) 🔥*
