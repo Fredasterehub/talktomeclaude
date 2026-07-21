@@ -206,7 +206,10 @@ class SSHCommandTests(unittest.TestCase):
         with mock.patch.object(os, "name", "nt"):
             command = listen._ssh_base("dev@example")
 
-        self.assertEqual(command, ["ssh", "-o", "ConnectTimeout=10", "dev@example"])
+        self.assertEqual(
+            command,
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@example"],
+        )
         self.assertFalse(any("Control" in arg for arg in command))
 
     def test_remote_cwd_is_shell_quoted_in_claude_command(self) -> None:

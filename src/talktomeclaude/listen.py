@@ -385,9 +385,16 @@ def _record_push_toggle(
 def _record_always_on(
     on_level: Callable[[float], None] | None = None,
     on_recording: Callable[[], None] | None = None,
+    stop_event: "threading.Event | None" = None,
 ) -> "object | None":
     """Hands-free capture: calibrate the noise floor, trigger on speech
-    energy, and end the utterance after a trailing pause."""
+    energy, and end the utterance after a trailing pause.
+
+    A set *stop_event* aborts at the next audio block so an idle hands-free
+    session — blocked on the microphone rather than on a key source — can still
+    unwind promptly when the dashboard asks it to stop.
+    """
+    stopping = lambda: stop_event is not None and stop_event.is_set()
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     preroll_blocks = max(1, int(_PREROLL_SECONDS / _BLOCK_SECONDS))
@@ -398,6 +405,8 @@ def _record_always_on(
     ) as stream:
         ambient_samples = []
         for _ in range(max(1, int(_CALIBRATION_SECONDS / _BLOCK_SECONDS))):
+            if stopping():
+                return None
             block, _overflowed = stream.read(blocksize)
             ambient_samples.append(_rms(block))
         noise_floor = sum(ambient_samples) / len(ambient_samples)
@@ -406,6 +415,8 @@ def _record_always_on(
         chunks: list = []
         silent_blocks = 0
         while True:
+            if stopping():
+                return None
             block, _overflowed = stream.read(blocksize)
             level = _rms(block)
             if chunks:
@@ -438,7 +449,7 @@ def _ssh_base(remote: str) -> list[str]:
     Unix control-socket settings, which are not consistently supported by the
     in-box OpenSSH client.
     """
-    command = ["ssh", "-o", "ConnectTimeout=10"]
+    command = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
     if not _is_windows():
         command += [
             "-o", "ControlMaster=auto",
@@ -622,6 +633,8 @@ def run_listen(
     on_progress: Callable[[], None] | None = None,
     trigger_key: str | None = None,
     start_recording: bool = False,
+    keys: "_RawKeys | None" = None,
+    stop_event: "threading.Event | None" = None,
 ) -> None:
     """Drive the capture → transcribe → inject → reply loop until interrupted.
 
@@ -630,6 +643,13 @@ def run_listen(
     machine — the remote/SSH pattern (voice where you sit, compute on the
     server). *remote_cwd* selects the project directory for remote ``claude``
     sessions.
+
+    *keys* lets a caller inject its own key source instead of opening a raw
+    terminal reader. The interactive dashboard passes a queue-backed source so
+    Textual keeps sole ownership of the TTY while still feeding the trigger key.
+    *stop_event*, when set, unwinds the loop cleanly between (and during)
+    captures — the graceful path for hands-free ``always-on`` sessions, whose
+    microphone read never sees the key source's shutdown sentinel.
     """
     set_phase = on_phase or (lambda _phase: None)
     set_phase("starting")
@@ -644,7 +664,8 @@ def run_listen(
         "push-toggle": "tap any key to talk; tap again to send; Ctrl-C to stop",
     }
     status(prompts[mode])
-    keys = _RawKeys() if mode in ("push-to-talk", "push-toggle") else None
+    if keys is None and mode in ("push-to-talk", "push-toggle"):
+        keys = _RawKeys()
     first_capture = True
 
     def capture():
@@ -652,7 +673,9 @@ def run_listen(
         set_phase("ready")
         recording = lambda: set_phase("recording")
         if mode == "always-on":
-            return _record_always_on(on_level=on_level, on_recording=recording)
+            return _record_always_on(
+                on_level=on_level, on_recording=recording, stop_event=stop_event
+            )
         with keys:
             if mode == "push-to-talk":
                 return _record_push_to_talk(
@@ -672,6 +695,8 @@ def run_listen(
             )
 
     while True:
+        if stop_event is not None and stop_event.is_set():
+            return
         audio = capture()
         if audio is None:
             continue
