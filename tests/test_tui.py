@@ -315,10 +315,13 @@ class _FakeProc:
         self.returncode = None
         self._rc = returncode
 
-    def wait(self):
+    def wait(self, timeout=None):
         self.returncode = self._rc
 
     def terminate(self):
+        self.returncode = self._rc
+
+    def kill(self):
         self.returncode = self._rc
 
 
@@ -354,6 +357,29 @@ class StreamConsumeTests(unittest.TestCase):
         with mock.patch.object(listen.subprocess, "Popen", return_value=_FakeProc(lines)):
             with self.assertRaisesRegex(listen.ListenError, "without a result"):
                 listen._consume_stream(["claude"], lambda _event: None, None, None)
+
+    def test_error_result_raises_instead_of_speaking(self) -> None:
+        lines = self._lines(
+            {"type": "result", "is_error": True, "result": "API overloaded", "session_id": "s"}
+        )
+        with mock.patch.object(listen.subprocess, "Popen", return_value=_FakeProc(lines)):
+            with self.assertRaisesRegex(listen.ListenError, "API overloaded"):
+                listen._consume_stream(["claude"], lambda _event: None, None, None)
+
+    def test_stop_event_aborts_mid_stream(self) -> None:
+        event = threading.Event()
+        event.set()
+        lines = self._lines(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+            {"type": "result", "result": "done", "session_id": "s"},
+        )
+        proc = _FakeProc(lines)
+        with mock.patch.object(listen.subprocess, "Popen", return_value=proc):
+            result, _session = listen._consume_stream(
+                ["claude"], lambda _event: None, None, None, event
+            )
+        self.assertEqual(result, "")
+        self.assertIsNotNone(proc.returncode)  # child was reaped, not orphaned
 
 
 class RemoteProjectTests(unittest.TestCase):

@@ -479,37 +479,50 @@ def _brief_result(content: object) -> str:
     return _truncate(content)
 
 
+def _content_blocks(event: dict) -> list[dict]:
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+
+
 def _mirror_lines(event: dict) -> list[tuple[str, str]]:
-    """Turn one claude stream-json event into styled mirror lines. Unknown event
-    types yield nothing (tolerated, not fatal). Tool I/O is truncated so a huge
-    file dump or a secret can't flood or leak into the panel."""
+    """Turn one claude stream-json event into styled mirror lines. Unknown or
+    malformed events yield nothing (tolerated, not fatal); every shape is
+    coerced defensively. Tool I/O is truncated so a huge file dump can't flood
+    the panel."""
+    if not isinstance(event, dict):
+        return []
     etype = event.get("type")
     if etype == "system" and event.get("subtype") == "init":
         model = event.get("model") or "claude"
-        tools = len(event.get("tools") or [])
-        return [("mark", f"● session · {model} · {tools} tools")]
+        tools = event.get("tools")
+        count = len(tools) if isinstance(tools, list) else 0
+        return [("mark", f"● session · {model} · {count} tools")]
     if etype == "assistant":
         lines: list[tuple[str, str]] = []
-        for block in (event.get("message") or {}).get("content", []) or []:
+        for block in _content_blocks(event):
             btype = block.get("type")
             if btype == "tool_use":
-                lines.append(("tool", f"▸ {block.get('name', 'tool')}  {_brief_input(block.get('input'))}"))
+                lines.append(("tool", f"▸ {block.get('name') or 'tool'}  {_brief_input(block.get('input'))}"))
             elif btype == "thinking":
                 lines.append(("thinking", "· thinking…"))
             elif btype == "text":
-                text = (block.get("text") or "").strip()
+                text = block.get("text")
+                text = text.strip() if isinstance(text, str) else ""
                 if text:
                     lines.append(("text", _truncate(text, 200)))
         return lines
     if etype == "user":
-        lines = []
-        for block in (event.get("message") or {}).get("content", []) or []:
-            if block.get("type") == "tool_result":
-                lines.append(("out", "  ↳ " + _brief_result(block.get("content"))))
-        return lines
+        return [
+            ("out", "  ↳ " + _brief_result(block.get("content")))
+            for block in _content_blocks(event)
+            if block.get("type") == "tool_result"
+        ]
     if etype == "result":
         marker = "error" if event.get("is_error") else "done"
-        return [("mark", f"● {marker} · {int(event.get('duration_ms') or 0)} ms")]
+        duration = event.get("duration_ms")
+        millis = int(duration) if isinstance(duration, (int, float)) else 0
+        return [("mark", f"● {marker} · {millis} ms")]
     return []
 
 

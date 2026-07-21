@@ -25,6 +25,7 @@ the TTS voice and re-transcribes it as a prompt.
 
 import json
 import os
+import queue
 import shlex
 import shutil
 import subprocess
@@ -478,6 +479,7 @@ def _prompt_claude(
     remote_cwd: str | None = None,
     on_wait: Callable[[], None] | None = None,
     on_event: "Callable[[dict], None] | None" = None,
+    stop_event: "threading.Event | None" = None,
 ) -> tuple[str, str | None]:
     """Primary injection path (D-3): drive a claude -p session, resuming it
     across turns; the reply arrives as structured JSON.
@@ -514,7 +516,7 @@ def _prompt_claude(
         if session_id:
             command += ["--resume", session_id]
     if on_event is not None:
-        return _consume_stream(command, on_event, on_wait, remote)
+        return _consume_stream(command, on_event, on_wait, remote, stop_event)
     try:
         result = _run_captured(command, on_wait=on_wait)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -601,20 +603,34 @@ def _run_captured(
     )
 
 
+def _reap(process: "subprocess.Popen", timeout: float = 2.0) -> None:
+    """Terminate a child and guarantee it is reaped: SIGTERM, a bounded wait,
+    then SIGKILL so a signal-resistant process can never hang the caller."""
+    process.terminate()
+    try:
+        process.wait(timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def _consume_stream(
     command: list[str],
     on_event: "Callable[[dict], None]",
     on_wait: Callable[[], None] | None,
     remote: str | None,
+    stop_event: "threading.Event | None" = None,
 ) -> tuple[str, str | None]:
     """Run a ``claude -p --output-format stream-json`` session, surfacing each
     NDJSON event live via *on_event*, and return only the authoritative final
     ``result`` text plus its session id.
 
-    stderr is drained on a side thread so a full pipe can never deadlock the
-    reader; unknown event types and malformed lines are tolerated rather than
-    fatal (Codex review). The command is never given a PTY, so the stream stays
-    clean NDJSON even over SSH.
+    stdout is read on a side thread and fed through a queue so a set
+    *stop_event* interrupts a mid-stream turn (the reader would otherwise block
+    until Claude finished). stderr is drained on its own thread so a full pipe
+    can never deadlock; unknown event types and malformed lines are tolerated;
+    the child is always reaped with a bounded wait. No PTY is used, so the
+    stream stays clean NDJSON even over SSH.
     """
     try:
         process = subprocess.Popen(
@@ -637,15 +653,40 @@ def _consume_stream(
             for chunk in process.stderr:
                 stderr_chunks.append(chunk)
 
+    sentinel = object()
+    stdout_lines: "queue.Queue[object]" = queue.Queue()
+
+    def read_stdout() -> None:
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    stdout_lines.put(line)
+        finally:
+            stdout_lines.put(sentinel)
+
     stderr_worker = threading.Thread(target=drain_stderr, daemon=True)
+    reader = threading.Thread(target=read_stdout, daemon=True)
     stderr_worker.start()
+    reader.start()
 
     result_text = ""
     session_id: str | None = None
-    got_result = False
+    is_error = False
+    outcome = "eof"
     try:
-        assert process.stdout is not None
-        for line in process.stdout:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                outcome = "stopped"
+                break
+            try:
+                line = stdout_lines.get(timeout=0.1)
+            except queue.Empty:
+                if on_wait is not None:
+                    on_wait()
+                continue
+            if line is sentinel:
+                outcome = "eof"
+                break
             if on_wait is not None:
                 on_wait()
             line = line.strip()
@@ -662,33 +703,45 @@ def _consume_stream(
             except Exception:
                 pass
             etype = event.get("type")
-            if etype == "system" and event.get("subtype") == "init":
-                session_id = event.get("session_id") or session_id
-            elif etype == "result":
-                got_result = True
+            new_session = event.get("session_id")
+            if isinstance(new_session, str) and new_session:
+                session_id = new_session
+            if etype == "result":
+                is_error = bool(event.get("is_error"))
                 reply = event.get("result")
                 result_text = reply if isinstance(reply, str) else ""
-                session_id = event.get("session_id") or session_id
+                outcome = "result"
+                break
     except BaseException:
-        process.terminate()
-        raise
-    finally:
-        process.wait()
+        _reap(process)
+        reader.join(1.0)
         stderr_worker.join(1.0)
+        raise
 
-    if process.returncode != 0:
+    if outcome == "eof":
+        process.wait()  # ended on its own; keep the real exit code
+    else:
+        _reap(process)  # stopped or done early — the child may still be running
+    reader.join(1.0)
+    stderr_worker.join(1.0)
+
+    if outcome == "stopped":
+        return "", session_id
+    if outcome == "eof":
         detail = "".join(stderr_chunks).strip() or f"exit {process.returncode}"
         where = f" on {remote}" if remote else ""
-        raise ListenError(
-            f"claude -p failed{where}: {detail}"
-            + (
-                "  (remote needs passwordless SSH keys and the claude CLI installed there)"
-                if remote
-                else ""
+        if process.returncode not in (0, None):
+            raise ListenError(
+                f"claude -p failed{where}: {detail}"
+                + (
+                    "  (remote needs passwordless SSH keys and the claude CLI installed there)"
+                    if remote
+                    else ""
+                )
             )
-        )
-    if not got_result:
         raise ListenError("claude -p stream ended without a result event")
+    if is_error:
+        raise ListenError(result_text.strip() or "claude reported an error")
     return result_text, session_id
 
 
@@ -823,6 +876,7 @@ def run_listen(
                 remote_cwd=remote_cwd,
                 on_wait=on_progress,
                 on_event=on_event,
+                stop_event=stop_event,
             )
             dialogue = speakable(reply)
             if dialogue:
