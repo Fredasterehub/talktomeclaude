@@ -1,6 +1,6 @@
 <!--
 AI ASSISTANTS: machine-readable install/usage instructions live in llms.txt at the repo root.
-URL: https://raw.githubusercontent.com/talktomeclaude/talktomeclaude/main/llms.txt
+URL: https://raw.githubusercontent.com/Fredasterehub/talktomeclaude/main/llms.txt
 Agent-facing conventions: llms.txt (install/usage) · AGENTS.md (contributor/agent guidance).
 -->
 
@@ -18,6 +18,8 @@ Agent-facing conventions: llms.txt (install/usage) · AGENTS.md (contributor/age
   <img alt="local-first" src="https://img.shields.io/badge/local--first-no%20cloud%20voice-171310">
   <img alt="voices: public domain" src="https://img.shields.io/badge/voices-public%20domain-e6b22e?labelColor=171310">
 </p>
+
+<p align="center"><a href="https://fredasterehub.github.io/talktomeclaude/"><strong>▶&nbsp; Live site</strong></a></p>
 
 **Put the keyboard down. Talk to Claude Code — and let it talk back.**
 
@@ -76,8 +78,8 @@ default **PowerShell** tab.
    ```
 
 3. **Get the code.** Easiest, no extra tools — download the ZIP:
-   - Go to <https://github.com/talktomeclaude/talktomeclaude>, click the green **Code** button ▸ **Download ZIP**, then right-click the file ▸ **Extract All**.
-   - *(Prefer git? Run `winget install --id Git.Git -e`, reopen the terminal, then `git clone https://github.com/talktomeclaude/talktomeclaude.git`.)*
+   - Go to <https://github.com/Fredasterehub/talktomeclaude>, click the green **Code** button ▸ **Download ZIP**, then right-click the file ▸ **Extract All**.
+   - *(Prefer git? Run `winget install --id Git.Git -e`, reopen the terminal, then `git clone https://github.com/Fredasterehub/talktomeclaude.git`.)*
    - The download is ~250 MB — that's the three bundled voices, not bloat.
 
 4. **Step into the folder** (adjust the path to where you extracted it):
@@ -127,7 +129,7 @@ For a beginner on Apple Silicon or Intel, using **Terminal.app**.
 
 3. **Get the code** (~250 MB — the bundled voices). The first time you run `git`, macOS pops up **"Install Command Line Tools" — click Install**, then re-run:
    ```bash
-   git clone https://github.com/talktomeclaude/talktomeclaude.git
+   git clone https://github.com/Fredasterehub/talktomeclaude.git
    cd talktomeclaude
    ```
 
@@ -179,7 +181,7 @@ For a beginner on Ubuntu/Debian. Fedora and Arch equivalents are on each line.
 
 3. **Get the code** (~250 MB — the bundled voices):
    ```bash
-   git clone https://github.com/talktomeclaude/talktomeclaude.git
+   git clone https://github.com/Fredasterehub/talktomeclaude.git
    cd talktomeclaude
    ```
 
@@ -276,7 +278,7 @@ Claude Code plugin wiring, the CLI surface, and the platform gotchas — is in
 **[`AGENTS.md`](AGENTS.md)**.
 
 ```
-https://raw.githubusercontent.com/talktomeclaude/talktomeclaude/main/llms.txt
+https://raw.githubusercontent.com/Fredasterehub/talktomeclaude/main/llms.txt
 ```
 
 ## License

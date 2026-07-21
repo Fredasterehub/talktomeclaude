@@ -30,3 +30,6 @@ node_modules/
 
 # generated data-uri working files
 assets/*.datauri.txt
+
+# TODO(voices): large TTS models held out of git pending hosting decision (LFS vs release asset)
+voices/

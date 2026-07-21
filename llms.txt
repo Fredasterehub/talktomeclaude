@@ -6,7 +6,7 @@
 ```yaml
 name: talktomeclaude
 description: Local-first voice medium for Claude Code. You speak (local Whisper-class STT); Claude answers back in a real voice speaking ONLY its dialogue (never tool calls, code, or logs) via a Claude Code plugin Stop hook.
-repo: https://github.com/talktomeclaude/talktomeclaude
+repo: https://github.com/Fredasterehub/talktomeclaude
 license: MIT
 version: 0.1
 entrypoint: talktomeclaude   # console script installed into the venv
@@ -33,7 +33,7 @@ depends_on_optional:
 # Windows Terminal (PowerShell)
 steps:
   - cmd: 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'   # install uv (also fetches Python)
-  - note: "get the code — Code > Download ZIP and extract, OR: winget install --id Git.Git -e; git clone https://github.com/talktomeclaude/talktomeclaude.git"
+  - note: "get the code — Code > Download ZIP and extract, OR: winget install --id Git.Git -e; git clone https://github.com/Fredasterehub/talktomeclaude.git"
   - cmd: 'cd talktomeclaude'
   - cmd: 'uv venv --python 3.12'
   - cmd: 'uv pip install -e .'
@@ -45,7 +45,7 @@ steps:
 # Terminal.app (Apple Silicon or Intel). No CUDA on macOS -> STT runs the CPU tier (expected).
 steps:
   - cmd: 'curl -LsSf https://astral.sh/uv/install.sh | sh'   # install uv (also fetches Python)
-  - cmd: 'git clone https://github.com/talktomeclaude/talktomeclaude.git'   # first git run prompts to install Command Line Tools
+  - cmd: 'git clone https://github.com/Fredasterehub/talktomeclaude.git'   # first git run prompts to install Command Line Tools
   - cmd: 'cd talktomeclaude'
   - cmd: 'uv venv --python 3.12 && uv pip install -e .'
   - cmd: './.venv/bin/talktomeclaude speak "Hello from Claude."'   # verify
@@ -56,7 +56,7 @@ steps:
 steps:
   - cmd: 'sudo apt install -y libportaudio2 git'   # dnf: portaudio git · pacman: portaudio git
   - cmd: 'curl -LsSf https://astral.sh/uv/install.sh | sh'   # install uv (also fetches Python)
-  - cmd: 'git clone https://github.com/talktomeclaude/talktomeclaude.git'
+  - cmd: 'git clone https://github.com/Fredasterehub/talktomeclaude.git'
   - cmd: 'cd talktomeclaude'
   - cmd: 'uv venv --python 3.12 && uv pip install -e .'
   - cmd: 'uv pip install -e ".[cuda]"'   # OPTIONAL: NVIDIA GPU tier for STT (large-v3)
