@@ -41,6 +41,7 @@ recording modes. One local command.
 
 ## What it does
 
+- **Launch dashboard** — run `talktomeclaude` with no arguments for a live signal view, conversation status, recording controls, and a remote project picker.
 - **Hear you** — local speech-to-text, Whisper-class (faster-whisper). Your voice never leaves the machine.
 - **Answer back** — speaks Claude's actual dialogue in a real voice, and *only* the dialogue. Tool calls, fenced code, and thinking are stripped out.
 - **Ride Claude Code** — a plugin Stop hook speaks each reply automatically. Async, non-blocking, fails silent.
@@ -296,6 +297,11 @@ On Windows, talktomeclaude uses the native `msvcrt` console API for
 on macOS/Linux; native Windows omits Unix-only OpenSSH control-socket options
 for compatibility.
 
+Run `talktomeclaude` with no subcommand to open the dashboard. Press `P` to
+choose a project directory from the remote server, then press `Space` to start
+the voice session. The existing `talktomeclaude listen` command remains
+available for scripts and direct CLI use.
+
 **To switch back to all-local** (mic + Claude + speakers on one machine):
 ```bash
 talktomeclaude config set remote local
@@ -314,6 +320,7 @@ To forget the saved project directory too, run
 
 | Command | What it does |
 |---|---|
+| `talktomeclaude` / `ui` | Open the interactive dashboard with live microphone signal, session state, voice controls, and a remote project picker. |
 | `speak "text"` | Synthesize and play a line locally. `--out file.wav` writes instead of plays; `--voice NAME` picks a voice. |
 | `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--remote-cwd PATH` to select its project directory, `--tmux-pane` to type into a live TUI. |
 | `transcribe FILE` | Local speech-to-text on an audio file. `--device auto\|cuda\|cpu`, `--show-tier` to see which model runs. |

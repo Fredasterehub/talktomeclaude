@@ -29,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Callable
 
@@ -71,6 +72,9 @@ class UtteranceTranscriber:
         on_status: Callable[[str], None] | None = None,
     ) -> None:
         status = on_status or (lambda message: None)
+        self._requested_device = device
+        self._model_override = model
+        self._status = status
         tier = detect_tier(device, model)
         try:
             self._whisper = self._load(tier)
@@ -106,15 +110,38 @@ class UtteranceTranscriber:
         )
 
     def transcribe(self, audio) -> str:
+        try:
+            segments = self._decode(audio)
+        except Exception as exc:
+            if self.tier.device != "cuda" or self._requested_device == "cuda":
+                raise ListenError(
+                    f"transcription failed on {self.tier.describe()}: {exc}"
+                ) from exc
+            fallback = detect_tier("cpu", self._model_override)
+            self._status(
+                f"stt tier degraded: {self.tier.describe()} failed ({exc}); "
+                f"falling back to {fallback.describe()}"
+            )
+            try:
+                self._whisper = self._load(fallback)
+                self.tier = fallback
+                segments = self._decode(audio)
+            except Exception as fallback_exc:
+                raise ListenError(
+                    f"transcription failed on {fallback.describe()}: {fallback_exc}"
+                ) from fallback_exc
+        return " ".join(
+            part for part in (segment.text.strip() for segment in segments) if part
+        )
+
+    def _decode(self, audio):
         segments, _info = self._whisper.transcribe(
             audio,
             beam_size=5,
             hotwords=HOTWORDS,
             vad_filter=True,
         )
-        return " ".join(
-            part for part in (segment.text.strip() for segment in segments) if part
-        )
+        return segments
 
 
 def _sounddevice():
@@ -264,32 +291,52 @@ def _finish(chunks, minimum_seconds: float = _MIN_UTTERANCE_SECONDS):
     return audio
 
 
-def _record_push_to_talk(keys: _RawKeys) -> "object | None":
+def _wait_for_trigger(keys: _RawKeys, trigger_key: str | None) -> str | None:
+    while True:
+        key = keys.read_key(None)
+        if key is None or trigger_key is None or key == trigger_key:
+            return key
+
+
+def _report_level(block, on_level: Callable[[float], None] | None) -> None:
+    if on_level is not None:
+        on_level(_rms(block))
+
+
+def _record_push_to_talk(
+    keys: _RawKeys,
+    trigger_key: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+) -> "object | None":
     """Record while a key is held: terminal auto-repeat keeps the take alive,
     and a repeat gap longer than the release window ends it on POSIX. Native
     Windows polls the physical key state so its configurable repeat delay cannot
     truncate the start of an utterance."""
     keys.drain()
-    trigger_key = keys.read_key(None)
-    if trigger_key is None:
+    active_key = _wait_for_trigger(keys, trigger_key)
+    if active_key is None:
         return None
-    physical_state = keys.is_pressed(trigger_key)
+    physical_state = keys.is_pressed(active_key)
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     chunks = []
     last_key = time.monotonic()
     started = last_key
+    if on_recording is not None:
+        on_recording()
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
         while True:
             block, _overflowed = stream.read(blocksize)
             chunks.append(block.copy())
+            _report_level(block, on_level)
             if physical_state is None:
                 while keys.read_key(0) is not None:
                     last_key = time.monotonic()
             else:
-                physical_state = keys.is_pressed(trigger_key)
+                physical_state = keys.is_pressed(active_key)
             now = time.monotonic()
             if physical_state is False:
                 break
@@ -301,23 +348,33 @@ def _record_push_to_talk(keys: _RawKeys) -> "object | None":
     return _finish(chunks)
 
 
-def _record_push_toggle(keys: _RawKeys) -> "object | None":
+def _record_push_toggle(
+    keys: _RawKeys,
+    trigger_key: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+    start_immediately: bool = False,
+) -> "object | None":
     """Tap to start recording, tap again to send."""
     keys.drain()
-    if keys.read_key(None) is None:
+    if not start_immediately and _wait_for_trigger(keys, trigger_key) is None:
         return None
     keys.drain()
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     chunks = []
     started = time.monotonic()
+    if on_recording is not None:
+        on_recording()
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
         while True:
             block, _overflowed = stream.read(blocksize)
             chunks.append(block.copy())
-            if keys.read_key(0) is not None:
+            _report_level(block, on_level)
+            key = keys.read_key(0)
+            if key is not None and (trigger_key is None or key == trigger_key):
                 break
             if time.monotonic() - started > _MAX_UTTERANCE_SECONDS:
                 break
@@ -325,7 +382,10 @@ def _record_push_toggle(keys: _RawKeys) -> "object | None":
     return _finish(chunks)
 
 
-def _record_always_on() -> "object | None":
+def _record_always_on(
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+) -> "object | None":
     """Hands-free capture: calibrate the noise floor, trigger on speech
     energy, and end the utterance after a trailing pause."""
     sounddevice = _sounddevice()
@@ -348,6 +408,8 @@ def _record_always_on() -> "object | None":
         while True:
             block, _overflowed = stream.read(blocksize)
             level = _rms(block)
+            if chunks:
+                _report_level(block, on_level)
             if not chunks:
                 preroll.append(block.copy())
                 if len(preroll) > preroll_blocks:
@@ -355,6 +417,9 @@ def _record_always_on() -> "object | None":
                 if level >= threshold:
                     chunks = list(preroll)
                     silent_blocks = 0
+                    if on_recording is not None:
+                        on_recording()
+                    _report_level(block, on_level)
                 else:
                     noise_floor = 0.95 * noise_floor + 0.05 * level
                     threshold = max(noise_floor * 3.0, 0.01)
@@ -400,6 +465,7 @@ def _prompt_claude(
     session_id: str | None,
     remote: str | None = None,
     remote_cwd: str | None = None,
+    on_wait: Callable[[], None] | None = None,
 ) -> tuple[str, str | None]:
     """Primary injection path (D-3): drive a claude -p session, resuming it
     across turns; the reply arrives as structured JSON.
@@ -425,9 +491,14 @@ def _prompt_claude(
         command = [claude, "-p", text, "--output-format", "json"]
         if session_id:
             command += ["--resume", session_id]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = _run_captured(command, on_wait=on_wait)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ListenError(f"could not run claude -p: {exc}") from exc
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
     if result.returncode != 0:
-        detail = result.stderr.strip() or f"exit {result.returncode}"
+        detail = stderr.strip() or f"exit {result.returncode}"
         where = f" on {remote}" if remote else ""
         raise ListenError(
             f"claude -p failed{where}: {detail}"
@@ -437,8 +508,10 @@ def _prompt_claude(
                 else ""
             )
         )
+    if not stdout.strip():
+        raise ListenError("claude -p returned no JSON output")
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ListenError(f"claude -p returned non-JSON output: {exc}") from exc
     if not isinstance(payload, dict):
@@ -448,6 +521,59 @@ def _prompt_claude(
     return (
         reply if isinstance(reply, str) else "",
         new_session if isinstance(new_session, str) else session_id,
+    )
+
+
+def _run_captured(
+    command: list[str], on_wait: Callable[[], None] | None = None
+) -> subprocess.CompletedProcess:
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if on_wait is None:
+        result = subprocess.run(command, **kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            result.returncode,
+            result.stdout if isinstance(result.stdout, str) else "",
+            result.stderr if isinstance(result.stderr, str) else "",
+        )
+
+    process = subprocess.Popen(command, **kwargs)
+    captured: list[str | None] = [None, None]
+    failure: list[BaseException] = []
+
+    def communicate() -> None:
+        try:
+            captured[:] = process.communicate()
+        except BaseException as exc:
+            failure.append(exc)
+
+    worker = threading.Thread(target=communicate, daemon=True)
+    worker.start()
+    try:
+        while worker.is_alive():
+            on_wait()
+            worker.join(0.1)
+    except BaseException:
+        process.terminate()
+        worker.join(2.0)
+        if worker.is_alive():
+            process.kill()
+            worker.join()
+        raise
+    if failure:
+        raise failure[0]
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        captured[0] if isinstance(captured[0], str) else "",
+        captured[1] if isinstance(captured[1], str) else "",
     )
 
 
@@ -491,6 +617,11 @@ def run_listen(
     status: Callable[[str], None],
     remote: str | None = None,
     remote_cwd: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    on_progress: Callable[[], None] | None = None,
+    trigger_key: str | None = None,
+    start_recording: bool = False,
 ) -> None:
     """Drive the capture → transcribe → inject → reply loop until interrupted.
 
@@ -500,6 +631,8 @@ def run_listen(
     server). *remote_cwd* selects the project directory for remote ``claude``
     sessions.
     """
+    set_phase = on_phase or (lambda _phase: None)
+    set_phase("starting")
     transcriber = UtteranceTranscriber(device, model, on_status=status)
     if remote:
         status(f"remote: Claude Code runs on {remote} over SSH; voice stays local")
@@ -512,33 +645,59 @@ def run_listen(
     }
     status(prompts[mode])
     keys = _RawKeys() if mode in ("push-to-talk", "push-toggle") else None
+    first_capture = True
 
     def capture():
+        nonlocal first_capture
+        set_phase("ready")
+        recording = lambda: set_phase("recording")
         if mode == "always-on":
-            return _record_always_on()
+            return _record_always_on(on_level=on_level, on_recording=recording)
         with keys:
             if mode == "push-to-talk":
-                return _record_push_to_talk(keys)
-            return _record_push_toggle(keys)
+                return _record_push_to_talk(
+                    keys,
+                    trigger_key=trigger_key,
+                    on_level=on_level,
+                    on_recording=recording,
+                )
+            record_now = start_recording and first_capture
+            first_capture = False
+            return _record_push_toggle(
+                keys,
+                trigger_key=trigger_key,
+                on_level=on_level,
+                on_recording=recording,
+                start_immediately=record_now,
+            )
 
     while True:
         audio = capture()
         if audio is None:
             continue
+        set_phase("transcribing")
         text = transcriber.transcribe(audio).strip()
         if not text:
             continue
         echo(f"you: {text}")
+        set_phase("thinking")
         if tmux_pane:
             _send_tmux(tmux_pane, text, remote=remote)
             status(f"sent to tmux pane {tmux_pane}; the live TUI owns the reply")
+            set_phase("ready")
         else:
             reply, session_id = _prompt_claude(
-                text, session_id, remote=remote, remote_cwd=remote_cwd
+                text,
+                session_id,
+                remote=remote,
+                remote_cwd=remote_cwd,
+                on_wait=on_progress,
             )
             dialogue = speakable(reply)
             if dialogue:
                 echo(f"claude: {dialogue}")
+                set_phase("speaking")
                 speak(dialogue)
+            set_phase("ready")
         if once:
             return

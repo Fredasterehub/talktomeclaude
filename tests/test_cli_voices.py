@@ -10,7 +10,7 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from talktomeclaude import registry
+from talktomeclaude import cli, registry
 from talktomeclaude.cli import main
 
 
@@ -100,11 +100,22 @@ class VoiceCliTests(unittest.TestCase):
         # is passed as the voice_name, not None.
         self.assertEqual(synth.call_args.args[2], "en_US-ljspeech-high")
 
+    def test_dashboard_reply_consumes_configured_default_voice(self) -> None:
+        self.runner.invoke(main, ["config", "set", "default-voice", "en_US-ljspeech-high"])
+
+        with mock.patch.object(cli, "synthesize") as synth, mock.patch.object(
+            cli, "_play_wav"
+        ):
+            cli._speak_reply("hi")
+
+        self.assertEqual(synth.call_args.args[2], "en_US-ljspeech-high")
+
     def test_speak_with_uninstalled_clone_fails_cleanly(self) -> None:
         self.runner.invoke(main, ["voice", "create", "rick", "--reference", str(self._ref()), "--no-sample"])
-        result = self.runner.invoke(
-            main, ["speak", "hello", "--voice", "rick", "--out", str(self.root / "o.wav")]
-        )
+        with mock.patch("talktomeclaude.clone.clone_available", return_value=False):
+            result = self.runner.invoke(
+                main, ["speak", "hello", "--voice", "rick", "--out", str(self.root / "o.wav")]
+            )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("doctor", result.output)  # points the user at the install recipe
 

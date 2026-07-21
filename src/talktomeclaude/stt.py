@@ -34,6 +34,11 @@ CPU_TIER = STTTier(model="small.en", device="cpu", compute_type="int8")
 
 HOTWORDS = "Claude, Claude Code"
 
+_CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
+_CUDA_DLL_DIRECTORIES: set[str] = set()
+_CUDA_DLL_HANDLES: list[object] = []
+_CUDA_DLL_PATHS: set[str] = set()
+
 
 class STTError(RuntimeError):
     """Raised when transcription cannot proceed."""
@@ -49,14 +54,78 @@ def models_dir() -> Path:
 def _preload_cuda_libraries() -> None:
     """Make the pip-shipped CUDA runtime visible to CTranslate2.
 
-    The nvidia-cublas/nvidia-cudnn wheels install shared objects outside the
-    loader's default search path; loading them RTLD_GLOBAL up front lets
-    CTranslate2 resolve them without any LD_LIBRARY_PATH ceremony.
+    The nvidia-cublas/nvidia-cudnn wheels install libraries outside the
+    loader's default search path. On Windows, a CUDA-enabled Torch install
+    already loads a complete compatible CUDA/cuDNN set; use it for both Torch
+    and CTranslate2 instead of loading a second, potentially incompatible
+    cuDNN from the NVIDIA wheels. Without CUDA Torch, register the NVIDIA bin
+    directories. POSIX loads the wheel-provided shared objects RTLD_GLOBAL.
     """
+    if os.name == "nt":
+        try:
+            import torch
+        except (ImportError, OSError):
+            pass
+        else:
+            if getattr(getattr(torch, "version", None), "cuda", None):
+                return
+
     try:
         import nvidia
     except ImportError:
         return
+
+    if os.name == "nt":
+        registered: list[str] = []
+        for package_path in nvidia.__path__:
+            for bin_dir in sorted(glob.glob(os.path.join(package_path, "*", "bin"))):
+                directory = os.path.abspath(bin_dir)
+                if directory in _CUDA_DLL_DIRECTORIES:
+                    continue
+                try:
+                    handle = os.add_dll_directory(directory)
+                except OSError:
+                    continue
+                _CUDA_DLL_DIRECTORIES.add(directory)
+                _CUDA_DLL_DIRECTORY_HANDLES.append(handle)
+                registered.append(directory)
+        if registered:
+            current_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = os.pathsep.join([*registered, current_path])
+            pending = [
+                path
+                for directory in registered
+                for path in glob.glob(os.path.join(directory, "*.dll"))
+                if path not in _CUDA_DLL_PATHS
+            ]
+            priorities = ("cublaslt", "cublas64", "cudnn64")
+            pending.sort(
+                key=lambda path: next(
+                    (
+                        index
+                        for index, prefix in enumerate(priorities)
+                        if os.path.basename(path).lower().startswith(prefix)
+                    ),
+                    len(priorities),
+                )
+            )
+            while pending:
+                remaining: list[str] = []
+                loaded = False
+                for dll_path in pending:
+                    try:
+                        handle = ctypes.WinDLL(dll_path)
+                    except OSError:
+                        remaining.append(dll_path)
+                        continue
+                    _CUDA_DLL_HANDLES.append(handle)
+                    _CUDA_DLL_PATHS.add(dll_path)
+                    loaded = True
+                if not loaded:
+                    break
+                pending = remaining
+        return
+
     for package_path in nvidia.__path__:
         for lib_dir in sorted(glob.glob(os.path.join(package_path, "*", "lib"))):
             for shared_object in sorted(glob.glob(os.path.join(lib_dir, "*.so*"))):
@@ -67,10 +136,10 @@ def _preload_cuda_libraries() -> None:
 
 
 def cuda_available() -> bool:
-    _preload_cuda_libraries()
     try:
+        _preload_cuda_libraries()
         import ctranslate2
-    except ImportError:
+    except (ImportError, OSError):
         return False
     try:
         return ctranslate2.get_cuda_device_count() > 0
@@ -80,6 +149,8 @@ def cuda_available() -> bool:
 
 def detect_tier(device: str = "auto", model: str | None = None) -> STTTier:
     """Resolve the active tier (D-1): auto-detected, with a manual override."""
+    if device == "cuda":
+        _preload_cuda_libraries()
     if device == "auto":
         tier = GPU_TIER if cuda_available() else CPU_TIER
     elif device == "cuda":

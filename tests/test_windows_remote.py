@@ -8,6 +8,7 @@ import os
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from click.testing import CliRunner
 from talktomeclaude import config
 from talktomeclaude.cli import main
 from talktomeclaude import listen
+from talktomeclaude.stt import CPU_TIER, GPU_TIER
 
 
 class WindowsTerminalTests(unittest.TestCase):
@@ -233,6 +235,59 @@ class SSHCommandTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[-1], expected_remote_command)
         self.assertEqual(result, ("done", "new-session"))
+
+    def test_prompt_claude_reports_missing_captured_output(self) -> None:
+        completed = SimpleNamespace(returncode=0, stdout=None, stderr=None)
+
+        with mock.patch.object(listen.subprocess, "run", return_value=completed):
+            with self.assertRaisesRegex(listen.ListenError, "returned no JSON output"):
+                listen._prompt_claude("hello", None, remote="dev@example")
+
+    def test_prompt_claude_reports_progress_while_process_runs(self) -> None:
+        process = mock.Mock(returncode=0)
+
+        def communicate():
+            time.sleep(0.03)
+            return json.dumps({"result": "done", "session_id": "session-1"}), ""
+
+        process.communicate.side_effect = communicate
+        progress = mock.Mock()
+
+        with mock.patch.object(listen.subprocess, "Popen", return_value=process) as popen:
+            result = listen._prompt_claude(
+                "hello",
+                None,
+                remote="dev@example",
+                on_wait=progress,
+            )
+
+        self.assertEqual(result, ("done", "session-1"))
+        progress.assert_called()
+        self.assertIs(popen.call_args.kwargs["stdin"], listen.subprocess.DEVNULL)
+        self.assertIs(popen.call_args.kwargs["stdout"], listen.subprocess.PIPE)
+        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(popen.call_args.kwargs["errors"], "replace")
+
+
+class TranscriberFallbackTests(unittest.TestCase):
+    def test_live_auto_cuda_decode_failure_falls_back_to_cpu(self) -> None:
+        gpu = mock.Mock()
+        gpu.transcribe.side_effect = RuntimeError("cublas64_12.dll is not found")
+        cpu = mock.Mock()
+        cpu.transcribe.return_value = ([SimpleNamespace(text=" recovered ")], None)
+        statuses: list[str] = []
+
+        with mock.patch.object(
+            listen, "detect_tier", side_effect=[GPU_TIER, CPU_TIER]
+        ), mock.patch.object(
+            listen.UtteranceTranscriber, "_load", side_effect=[gpu, cpu]
+        ):
+            transcriber = listen.UtteranceTranscriber("auto", on_status=statuses.append)
+            result = transcriber.transcribe(object())
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(transcriber.tier.device, "cpu")
+        self.assertTrue(any("degraded" in message for message in statuses))
 
 
 class RemoteCwdConfigAndCLITests(unittest.TestCase):

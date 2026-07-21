@@ -14,9 +14,12 @@ from talktomeclaude.tts import (
 )
 
 
-@click.group()
-def main() -> None:
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """Use voice as a medium for Claude Code."""
+    if ctx.invoked_subcommand is None:
+        _launch_dashboard()
 
 
 @main.command()
@@ -43,9 +46,7 @@ def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
     """
     playback = out_path is None
     if playback:
-        import tempfile
-
-        out_path = Path(tempfile.mkstemp(prefix="talktomeclaude-", suffix=".wav")[1])
+        out_path = _temporary_wav_path("talktomeclaude-")
     voice_name = _resolve_default_voice(voice_name)
     try:
         voice = synthesize(
@@ -81,6 +82,15 @@ def _play_wav(path: Path) -> None:
         sounddevice.play(samples, samplerate=wav.getframerate(), blocking=True)
 
 
+def _temporary_wav_path(prefix: str) -> Path:
+    import os
+    import tempfile
+
+    handle, raw_path = tempfile.mkstemp(prefix=prefix, suffix=".wav")
+    os.close(handle)
+    return Path(raw_path)
+
+
 def _resolve_default_voice(explicit: str | None) -> str | None:
     """Which voice speak/listen should use: an explicit --voice wins, else the
     persisted default-voice (falling back to the auto default, with a warning,
@@ -102,6 +112,36 @@ def _resolve_default_voice(explicit: str | None) -> str | None:
         click.echo(f"default voice {name!r} is unavailable; using the auto default", err=True)
         return None
     return name
+
+
+def _speak_reply(text: str) -> None:
+    from talktomeclaude import config
+
+    if not config.voice_assist_enabled():
+        return
+    wav_path = _temporary_wav_path("talktomeclaude-listen-")
+    try:
+        synthesize(text, wav_path, _resolve_default_voice(None))
+        _play_wav(wav_path)
+    except (TTSError, click.ClickException):
+        pass
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
+def _launch_dashboard() -> None:
+    from talktomeclaude.tui import TUIError, run_dashboard
+
+    try:
+        run_dashboard(_speak_reply)
+    except TUIError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command()
+def ui() -> None:
+    """Open the interactive voice dashboard."""
+    _launch_dashboard()
 
 
 @main.group(invoke_without_command=True)
@@ -246,8 +286,6 @@ def voice_create(
     short test sample is rendered when the cloning engine is installed (run
     `doctor` for the install recipe); the voice registers either way.
     """
-    import tempfile
-
     from talktomeclaude import config as settings
     from talktomeclaude import registry, wizard
 
@@ -257,7 +295,7 @@ def voice_create(
     status = lambda message: click.echo(message, err=True)
     capture: Path | None = None
     if record_seconds is not None:
-        capture = Path(tempfile.mkstemp(prefix=f"ttmc-ref-{name}-", suffix=".wav")[1])
+        capture = _temporary_wav_path(f"ttmc-ref-{name}-")
         try:
             reference = wizard.record_reference(capture, seconds=record_seconds, on_status=status)
         except wizard.WizardError as exc:
@@ -440,22 +478,6 @@ def listen(
         remote_cwd if remote_cwd is not None else config.remote_cwd()
     ) if active_remote else None
 
-    reply_voice = _resolve_default_voice(None)
-
-    def speak_reply(text: str) -> None:
-        if not config.voice_assist_enabled():
-            return
-        import tempfile
-
-        wav_path = Path(tempfile.mkstemp(prefix="talktomeclaude-listen-", suffix=".wav")[1])
-        try:
-            synthesize(text, wav_path, reply_voice)
-            _play_wav(wav_path)
-        except (TTSError, click.ClickException):
-            pass
-        finally:
-            wav_path.unlink(missing_ok=True)
-
     try:
         run_listen(
             mode=active_mode,
@@ -465,7 +487,7 @@ def listen(
             model=model_name,
             once=once,
             echo=click.echo,
-            speak=speak_reply,
+            speak=_speak_reply,
             status=lambda message: click.echo(message, err=True),
             remote=active_remote,
             remote_cwd=active_remote_cwd,
@@ -604,9 +626,7 @@ def stop(dry_run: bool) -> None:
     if dry_run:
         click.echo("SPEAK: " + " ".join(dialogue.split()))
         return
-    import tempfile
-
-    wav_path = Path(tempfile.mkstemp(prefix="talktomeclaude-hook-", suffix=".wav")[1])
+    wav_path = _temporary_wav_path("talktomeclaude-hook-")
     try:
         synthesize(dialogue, wav_path, None)
         _play_wav(wav_path)

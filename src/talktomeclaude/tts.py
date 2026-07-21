@@ -238,6 +238,8 @@ def synthesize(
         input=text,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "no output"
