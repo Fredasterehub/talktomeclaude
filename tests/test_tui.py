@@ -131,6 +131,28 @@ class LiveSignalTests(unittest.TestCase):
 
         self.assertEqual(listen._wait_for_trigger(keys, " "), " ")
 
+    def test_immediate_toggle_uses_dashboard_space_as_start(self) -> None:
+        keys = mock.Mock()
+        keys.read_key.return_value = " "
+        block = mock.Mock()
+        block.copy.return_value = block
+        stream = mock.MagicMock()
+        stream.__enter__.return_value.read.return_value = (block, False)
+        sounddevice = mock.Mock()
+        sounddevice.InputStream.return_value = stream
+
+        with mock.patch.object(listen, "_sounddevice", return_value=sounddevice), mock.patch.object(
+            listen, "_rms", return_value=0.1
+        ), mock.patch.object(listen, "_finish", return_value="audio"):
+            result = listen._record_push_toggle(
+                keys,
+                trigger_key=" ",
+                start_immediately=True,
+            )
+
+        self.assertEqual(result, "audio")
+        keys.read_key.assert_called_once_with(0)
+
 
 class DashboardCLITests(unittest.TestCase):
     def test_no_arguments_launches_dashboard(self) -> None:

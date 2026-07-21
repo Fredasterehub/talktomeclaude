@@ -326,10 +326,11 @@ def _record_push_toggle(
     trigger_key: str | None = None,
     on_level: Callable[[float], None] | None = None,
     on_recording: Callable[[], None] | None = None,
+    start_immediately: bool = False,
 ) -> "object | None":
     """Tap to start recording, tap again to send."""
     keys.drain()
-    if _wait_for_trigger(keys, trigger_key) is None:
+    if not start_immediately and _wait_for_trigger(keys, trigger_key) is None:
         return None
     keys.drain()
     sounddevice = _sounddevice()
@@ -531,6 +532,7 @@ def run_listen(
     on_level: Callable[[float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
     trigger_key: str | None = None,
+    start_recording: bool = False,
 ) -> None:
     """Drive the capture → transcribe → inject → reply loop until interrupted.
 
@@ -554,8 +556,10 @@ def run_listen(
     }
     status(prompts[mode])
     keys = _RawKeys() if mode in ("push-to-talk", "push-toggle") else None
+    first_capture = True
 
     def capture():
+        nonlocal first_capture
         set_phase("ready")
         recording = lambda: set_phase("recording")
         if mode == "always-on":
@@ -568,11 +572,14 @@ def run_listen(
                     on_level=on_level,
                     on_recording=recording,
                 )
+            record_now = start_recording and first_capture
+            first_capture = False
             return _record_push_toggle(
                 keys,
                 trigger_key=trigger_key,
                 on_level=on_level,
                 on_recording=recording,
+                start_immediately=record_now,
             )
 
     while True:

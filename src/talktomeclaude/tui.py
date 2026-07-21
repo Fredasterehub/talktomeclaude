@@ -463,6 +463,7 @@ def run_dashboard(speak: Callable[[str], None]) -> None:
                     on_level=report_level,
                     on_phase=set_phase,
                     trigger_key=" ",
+                    start_recording=state.mode == "push-toggle",
                 )
             except KeyboardInterrupt:
                 state.phase = "ready"
