@@ -31,5 +31,7 @@ node_modules/
 # generated data-uri working files
 assets/*.datauri.txt
 
-# TODO(voices): large TTS models held out of git pending hosting decision (LFS vs release asset)
+# Voice models are fetched on first use from the Hugging Face Hub and cached
+# under ~/.cache/talktomeclaude/voices — never committed. A local voices/ dir is
+# honored first for offline use, but stays out of git (keeps the clone small).
 voices/

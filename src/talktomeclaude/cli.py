@@ -42,7 +42,9 @@ def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
 
         out_path = Path(tempfile.mkstemp(prefix="talktomeclaude-", suffix=".wav")[1])
     try:
-        voice = synthesize(text, out_path, voice_name)
+        voice = synthesize(
+            text, out_path, voice_name, on_status=lambda message: click.echo(message, err=True)
+        )
     except TTSError as exc:
         raise click.ClickException(str(exc)) from exc
     if not playback:
@@ -74,12 +76,41 @@ def _play_wav(path: Path) -> None:
 
 
 @main.command()
-def voices() -> None:
-    """List the bundled voices and their licenses."""
+@click.option(
+    "--download",
+    is_flag=True,
+    help="Fetch all voices into the local cache now, instead of on first use.",
+)
+def voices(download: bool) -> None:
+    """List the available voices and their licenses.
+
+    Voices are fetched from the Hugging Face Hub on first use and cached
+    locally; run with --download to pre-fetch them all up front.
+    """
+    from talktomeclaude.tts import cache_voices_dir, is_available, voice_files
+
     directory = voices_dir()
+    cache = cache_voices_dir()
+
+    if download:
+        for voice in BUNDLED_VOICES:
+            try:
+                model_path, _config = voice_files(
+                    voice, on_status=lambda message: click.echo(message, err=True)
+                )
+            except TTSError as exc:
+                raise click.ClickException(str(exc)) from exc
+            click.echo(f"{voice.name}: ready  ({model_path})")
+        return
+
     default = default_voice(directory)
     for voice in BUNDLED_VOICES:
-        status = "installed" if voice.is_installed(directory) else "not installed"
+        if voice.is_installed(directory):
+            status = "bundled"
+        elif voice.is_installed(cache):
+            status = "cached"
+        else:
+            status = "on-demand"
         marker = "  (default)" if voice.name == default.name else ""
         click.echo(
             f"{voice.name}  [{voice.language}, {voice.quality}, {status}]  "

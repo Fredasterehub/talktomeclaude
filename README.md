@@ -25,13 +25,13 @@ Agent-facing conventions: llms.txt (install/usage) · AGENTS.md (contributor/age
 
 talktomeclaude is a local-first voice medium for Claude Code. You speak, Claude
 works, Claude answers back in a real-sounding voice — headphones on, hands off.
-The listening is local (Whisper-class). The speaking is local (bundled Piper
+The listening is local (Whisper-class). The speaking is local (Piper
 voices). Claude's own brain stays in the cloud; everything around it runs on
 your machine.
 
 It filters Claude's spoken dialogue out of the transcript — **only the dialogue,
 never tool calls, never code, never logs** — speaks it through one of three
-bundled public-domain voices, and rides a Claude Code Stop hook so replies are
+public-domain voices, and rides a Claude Code Stop hook so replies are
 spoken the moment Claude finishes. A mute switch that actually mutes. Three
 recording modes. One local command.
 
@@ -46,14 +46,14 @@ recording modes. One local command.
 - **Ride Claude Code** — a plugin Stop hook speaks each reply automatically. Async, non-blocking, fails silent.
 - **Three recording modes** — `always-on` (hands-free, pause-gated), `push-to-talk` (hold a key), `push-toggle` (tap to start, tap to send).
 - **A real mute** — `assist off` and the whole thing goes quiet, hook included.
-- **Ship silent-proof** — three bundled voices, all public domain, so day one is never a robot.
+- **Ship silent-proof** — three public-domain voices, fetched automatically on first use, so day one is never a robot.
 
 ---
 
 ## Requirements
 
 - **Python 3.11 or newer** (the installers below fetch it for you if you don't have it).
-- **~250 MB of disk for the clone** — the three voices ship *in the repo*, so there's no separate voice download.
+- **A fast, lightweight clone** — the voice models are *not* committed to the repo. They download once, on your first `speak` (~250 MB for all three), and cache under `~/.cache/talktomeclaude/voices`. Pre-fetch them any time — e.g. before going offline — with `talktomeclaude voices --download`.
 - **A one-time model download on first transcription** — the local Whisper model pulls itself the first time you use `transcribe`/`listen`: **~486 MB** on the CPU tier (`small.en`), or **~3 GB** on the NVIDIA/CUDA tier (`large-v3`). It caches under `~/.cache/talktomeclaude/` and never downloads again.
 - **[Claude Code](https://code.claude.com)** on your PATH if you want the voice loop and the Stop-hook plugin (the CLI works standalone without it).
 
@@ -80,7 +80,7 @@ default **PowerShell** tab.
 3. **Get the code.** Easiest, no extra tools — download the ZIP:
    - Go to <https://github.com/Fredasterehub/talktomeclaude>, click the green **Code** button ▸ **Download ZIP**, then right-click the file ▸ **Extract All**.
    - *(Prefer git? Run `winget install --id Git.Git -e`, reopen the terminal, then `git clone https://github.com/Fredasterehub/talktomeclaude.git`.)*
-   - The download is ~250 MB — that's the three bundled voices, not bloat.
+   - The clone is small and fast — the voice models download later, on your first `speak` (~250 MB, cached once).
 
 4. **Step into the folder** (adjust the path to where you extracted it):
    ```powershell
@@ -127,7 +127,7 @@ For a beginner on Apple Silicon or Intel, using **Terminal.app**.
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-3. **Get the code** (~250 MB — the bundled voices). The first time you run `git`, macOS pops up **"Install Command Line Tools" — click Install**, then re-run:
+3. **Get the code** (a fast, lightweight clone — voices download later, on first use). The first time you run `git`, macOS pops up **"Install Command Line Tools" — click Install**, then re-run:
    ```bash
    git clone https://github.com/Fredasterehub/talktomeclaude.git
    cd talktomeclaude
@@ -179,7 +179,7 @@ For a beginner on Ubuntu/Debian. Fedora and Arch equivalents are on each line.
    curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
-3. **Get the code** (~250 MB — the bundled voices):
+3. **Get the code** (a fast, lightweight clone — voices download on first use):
    ```bash
    git clone https://github.com/Fredasterehub/talktomeclaude.git
    cd talktomeclaude
@@ -240,9 +240,11 @@ talktomeclaude config set recording-mode push-to-talk   # or always-on, push-tog
 
 ## The voices
 
-Three bundled voices, every one **public domain** — trained from scratch, no
-copyrighted or celebrity source. Day one is never silent, and copyright stays
-clean. Bring or clone your own on top.
+Three voices, every one **public domain** — trained from scratch, no
+copyrighted or celebrity source. They're fetched automatically from the
+[Hugging Face Hub](https://huggingface.co/rhasspy/piper-voices) on first use and
+cached locally; run `talktomeclaude voices --download` to pre-fetch them. Day one
+is never silent, and copyright stays clean. Bring or clone your own on top.
 
 | Voice | Accent | Quality |
 |---|---|---|

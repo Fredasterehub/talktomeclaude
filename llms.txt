@@ -15,11 +15,13 @@ entrypoint: talktomeclaude   # console script installed into the venv
 ## REQUIREMENTS
 ```yaml
 python: ">=3.11"
-clone_size: "~250 MB"          # three TTS voices are bundled IN the repo; no separate voice download
-first_run_download:            # Whisper STT model, downloaded ONCE on first transcribe/listen, then cached
-  cpu_tier: "~486 MB (small.en)"
-  gpu_tier: "~3 GB (large-v3, needs NVIDIA + CUDA)"
-  cache_dir: "~/.cache/talktomeclaude/stt-models"
+clone_size: "~5 MB"            # voice models are NOT committed to git; fetched on first use (cache-on-demand)
+first_run_downloads:           # each downloaded ONCE then reused; all under ~/.cache/talktomeclaude/
+  tts_voices: "~250 MB total — 3 public-domain Piper voices from HF rhasspy/piper-voices, on first `speak`. Pre-fetch: talktomeclaude voices --download"
+  stt_model:
+    cpu_tier: "~486 MB (small.en)"
+    gpu_tier: "~3 GB (large-v3, needs NVIDIA + CUDA)"
+  cache_dir: "~/.cache/talktomeclaude/"
 system_packages:
   linux: [libportaudio2, git]   # dnf: portaudio · pacman: portaudio  (PortAudio powers mic/speaker via sounddevice)
   macos: []                     # git via Xcode Command Line Tools (auto-prompt on first git use)
@@ -78,7 +80,7 @@ commands:
   listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--once]'
   transcribe: 'talktomeclaude transcribe AUDIO [--device auto|cuda|cpu] [--show-tier]'
   filter:     'talktomeclaude filter transcript.jsonl'   # prints only spoken dialogue (never code/tools)
-  voices:     'talktomeclaude voices'                    # list bundled voices + licenses
+  voices:     'talktomeclaude voices [--download]'       # list voices + licenses; --download pre-fetches all
   config:     'talktomeclaude config set|get recording-mode|voice-assist VALUE'
   assist:     'talktomeclaude assist on|off|status'
 default_recording_mode: push-to-talk
@@ -86,8 +88,10 @@ default_recording_mode: push-to-talk
 
 ## VOICES
 ```yaml
-# All bundled, all public domain (trained from scratch; no copyrighted/celebrity voices). Piper runs as a subprocess (keeps project MIT).
-bundled:
+# All public domain (trained from scratch; no copyrighted/celebrity voices). Fetched on first use from
+# HF rhasspy/piper-voices, cached at ~/.cache/talktomeclaude/voices (pre-fetch: talktomeclaude voices --download).
+# Piper runs as a subprocess (keeps project MIT).
+available:
   - {name: en_US-ljspeech-high, accent: en_US, quality: high}
   - {name: en_GB-cori-medium,   accent: en_GB, quality: medium}
   - {name: en_US-bryce-medium,  accent: en_US, quality: medium}
