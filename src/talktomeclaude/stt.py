@@ -36,6 +36,8 @@ HOTWORDS = "Claude, Claude Code"
 
 _CUDA_DLL_DIRECTORY_HANDLES: list[object] = []
 _CUDA_DLL_DIRECTORIES: set[str] = set()
+_CUDA_DLL_HANDLES: list[object] = []
+_CUDA_DLL_PATHS: set[str] = set()
 
 
 class STTError(RuntimeError):
@@ -78,6 +80,38 @@ def _preload_cuda_libraries() -> None:
         if registered:
             current_path = os.environ.get("PATH", "")
             os.environ["PATH"] = os.pathsep.join([*registered, current_path])
+            pending = [
+                path
+                for directory in registered
+                for path in glob.glob(os.path.join(directory, "*.dll"))
+                if path not in _CUDA_DLL_PATHS
+            ]
+            priorities = ("cublaslt", "cublas64", "cudnn64")
+            pending.sort(
+                key=lambda path: next(
+                    (
+                        index
+                        for index, prefix in enumerate(priorities)
+                        if os.path.basename(path).lower().startswith(prefix)
+                    ),
+                    len(priorities),
+                )
+            )
+            while pending:
+                remaining: list[str] = []
+                loaded = False
+                for dll_path in pending:
+                    try:
+                        handle = ctypes.WinDLL(dll_path)
+                    except OSError:
+                        remaining.append(dll_path)
+                        continue
+                    _CUDA_DLL_HANDLES.append(handle)
+                    _CUDA_DLL_PATHS.add(dll_path)
+                    loaded = True
+                if not loaded:
+                    break
+                pending = remaining
         return
 
     for package_path in nvidia.__path__:

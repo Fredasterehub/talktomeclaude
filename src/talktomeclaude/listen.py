@@ -29,6 +29,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Callable
 
@@ -71,6 +72,9 @@ class UtteranceTranscriber:
         on_status: Callable[[str], None] | None = None,
     ) -> None:
         status = on_status or (lambda message: None)
+        self._requested_device = device
+        self._model_override = model
+        self._status = status
         tier = detect_tier(device, model)
         try:
             self._whisper = self._load(tier)
@@ -106,15 +110,38 @@ class UtteranceTranscriber:
         )
 
     def transcribe(self, audio) -> str:
+        try:
+            segments = self._decode(audio)
+        except Exception as exc:
+            if self.tier.device != "cuda" or self._requested_device == "cuda":
+                raise ListenError(
+                    f"transcription failed on {self.tier.describe()}: {exc}"
+                ) from exc
+            fallback = detect_tier("cpu", self._model_override)
+            self._status(
+                f"stt tier degraded: {self.tier.describe()} failed ({exc}); "
+                f"falling back to {fallback.describe()}"
+            )
+            try:
+                self._whisper = self._load(fallback)
+                self.tier = fallback
+                segments = self._decode(audio)
+            except Exception as fallback_exc:
+                raise ListenError(
+                    f"transcription failed on {fallback.describe()}: {fallback_exc}"
+                ) from fallback_exc
+        return " ".join(
+            part for part in (segment.text.strip() for segment in segments) if part
+        )
+
+    def _decode(self, audio):
         segments, _info = self._whisper.transcribe(
             audio,
             beam_size=5,
             hotwords=HOTWORDS,
             vad_filter=True,
         )
-        return " ".join(
-            part for part in (segment.text.strip() for segment in segments) if part
-        )
+        return segments
 
 
 def _sounddevice():
@@ -438,6 +465,7 @@ def _prompt_claude(
     session_id: str | None,
     remote: str | None = None,
     remote_cwd: str | None = None,
+    on_wait: Callable[[], None] | None = None,
 ) -> tuple[str, str | None]:
     """Primary injection path (D-3): drive a claude -p session, resuming it
     across turns; the reply arrives as structured JSON.
@@ -463,9 +491,14 @@ def _prompt_claude(
         command = [claude, "-p", text, "--output-format", "json"]
         if session_id:
             command += ["--resume", session_id]
-    result = subprocess.run(command, capture_output=True, text=True)
+    try:
+        result = _run_captured(command, on_wait=on_wait)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ListenError(f"could not run claude -p: {exc}") from exc
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
     if result.returncode != 0:
-        detail = result.stderr.strip() or f"exit {result.returncode}"
+        detail = stderr.strip() or f"exit {result.returncode}"
         where = f" on {remote}" if remote else ""
         raise ListenError(
             f"claude -p failed{where}: {detail}"
@@ -475,8 +508,10 @@ def _prompt_claude(
                 else ""
             )
         )
+    if not stdout.strip():
+        raise ListenError("claude -p returned no JSON output")
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ListenError(f"claude -p returned non-JSON output: {exc}") from exc
     if not isinstance(payload, dict):
@@ -486,6 +521,57 @@ def _prompt_claude(
     return (
         reply if isinstance(reply, str) else "",
         new_session if isinstance(new_session, str) else session_id,
+    )
+
+
+def _run_captured(
+    command: list[str], on_wait: Callable[[], None] | None = None
+) -> subprocess.CompletedProcess:
+    kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "text": True,
+    }
+    if on_wait is None:
+        result = subprocess.run(command, **kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            result.returncode,
+            result.stdout if isinstance(result.stdout, str) else "",
+            result.stderr if isinstance(result.stderr, str) else "",
+        )
+
+    process = subprocess.Popen(command, **kwargs)
+    captured: list[str | None] = [None, None]
+    failure: list[BaseException] = []
+
+    def communicate() -> None:
+        try:
+            captured[:] = process.communicate()
+        except BaseException as exc:
+            failure.append(exc)
+
+    worker = threading.Thread(target=communicate, daemon=True)
+    worker.start()
+    try:
+        while worker.is_alive():
+            on_wait()
+            worker.join(0.1)
+    except BaseException:
+        process.terminate()
+        worker.join(2.0)
+        if worker.is_alive():
+            process.kill()
+            worker.join()
+        raise
+    if failure:
+        raise failure[0]
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        captured[0] if isinstance(captured[0], str) else "",
+        captured[1] if isinstance(captured[1], str) else "",
     )
 
 
@@ -531,6 +617,7 @@ def run_listen(
     remote_cwd: str | None = None,
     on_level: Callable[[float], None] | None = None,
     on_phase: Callable[[str], None] | None = None,
+    on_progress: Callable[[], None] | None = None,
     trigger_key: str | None = None,
     start_recording: bool = False,
 ) -> None:
@@ -598,7 +685,11 @@ def run_listen(
             set_phase("ready")
         else:
             reply, session_id = _prompt_claude(
-                text, session_id, remote=remote, remote_cwd=remote_cwd
+                text,
+                session_id,
+                remote=remote,
+                remote_cwd=remote_cwd,
+                on_wait=on_progress,
             )
             dialogue = speakable(reply)
             if dialogue:

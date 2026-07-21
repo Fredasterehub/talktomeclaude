@@ -57,6 +57,7 @@ class DashboardState:
     dialogue: list[tuple[str, str]] = field(default_factory=list)
     frame: int = 0
     reduced_motion: bool = False
+    phase_started_at: float = field(default_factory=time.monotonic, repr=False)
 
     def add_level(self, level: float) -> None:
         normalized = max(0.0, min(1.0, level * 16.0))
@@ -361,6 +362,8 @@ def run_dashboard(speak: Callable[[str], None]) -> None:
             last_draw = now
 
         def set_phase(phase: str) -> None:
+            if state.phase != phase:
+                state.phase_started_at = time.monotonic()
             state.phase = phase
             notices = {
                 "ready": "Press Space to record; press Space again to send",
@@ -372,6 +375,12 @@ def run_dashboard(speak: Callable[[str], None]) -> None:
             }
             state.notice = notices.get(phase, state.notice)
             draw(force=True)
+
+        def report_progress() -> None:
+            state.frame += 1
+            elapsed = max(0, int(time.monotonic() - state.phase_started_at))
+            state.notice = f"Claude is working ({elapsed}s)"
+            draw()
 
         def report_status(message: str) -> None:
             if message.startswith("stt tier:"):
@@ -462,6 +471,7 @@ def run_dashboard(speak: Callable[[str], None]) -> None:
                     remote_cwd=state.remote_cwd,
                     on_level=report_level,
                     on_phase=set_phase,
+                    on_progress=report_progress,
                     trigger_key=" ",
                     start_recording=state.mode == "push-toggle",
                 )
