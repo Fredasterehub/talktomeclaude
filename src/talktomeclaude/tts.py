@@ -1,61 +1,26 @@
-"""Local text-to-speech built on the Piper engine.
+"""Local text-to-speech.
 
 Piper's lineage is GPL-3.0, so it is never imported as a library: the plugin
 stays MIT by driving the ``piper`` executable through a subprocess boundary
-only. Voices are from-scratch public-domain trains, fetched on first use from
-the Hugging Face Hub and cached locally (a bundled/override ``voices/``
-directory is honored first for offline use).
+only. Bundled voices are from-scratch public-domain Piper trains, fetched on
+first use from the Hugging Face Hub and cached locally (a bundled/override
+``voices/`` directory is honored first for offline use).
+
+Beyond the three bundled voices, :func:`get_voice` resolves user voices through
+the :mod:`registry`: bring-your-own Piper voices synthesize through the same
+subprocess path, while cloned voices dispatch to the optional :mod:`clone`
+engine. The engine choice rides on each :class:`~catalog.Voice`'s ``engine``
+field; the Piper path is unchanged from the sealed build.
 """
 
 import os
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-
-@dataclass(frozen=True)
-class Voice:
-    name: str
-    language: str
-    quality: str
-    license: str
-    provenance: str
-
-    def model_path(self, voices_dir: Path) -> Path:
-        return voices_dir / f"{self.name}.onnx"
-
-    def config_path(self, voices_dir: Path) -> Path:
-        return voices_dir / f"{self.name}.onnx.json"
-
-    def is_installed(self, voices_dir: Path) -> bool:
-        return self.model_path(voices_dir).is_file() and self.config_path(voices_dir).is_file()
-
-
-BUNDLED_VOICES = (
-    Voice(
-        name="en_US-ljspeech-high",
-        language="en_US",
-        quality="high",
-        license="public domain",
-        provenance="LJ Speech dataset, trained from scratch",
-    ),
-    Voice(
-        name="en_GB-cori-medium",
-        language="en_GB",
-        quality="medium",
-        license="public domain",
-        provenance="LibriVox recordings, trained from scratch",
-    ),
-    Voice(
-        name="en_US-bryce-medium",
-        language="en_US",
-        quality="medium",
-        license="public domain",
-        provenance="author's own voice recordings",
-    ),
-)
+from talktomeclaude import registry
+from talktomeclaude.catalog import BUNDLED_VOICES, HF_VOICES_REPO, Voice
 
 _QUALITY_RANK = {"low": 0, "x_low": 0, "medium": 1, "high": 2}
 
@@ -71,17 +36,6 @@ def voices_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "voices"
 
 
-# Voices are public-domain Piper trains hosted canonically on the Hugging Face
-# Hub. They are fetched on first use and cached (mirroring the STT model), so
-# the repository stays small and installs never depend on git large-file limits.
-HF_VOICES_REPO = "rhasspy/piper-voices"
-_HF_VOICE_PATHS = {
-    "en_US-ljspeech-high": "en/en_US/ljspeech/high/en_US-ljspeech-high.onnx",
-    "en_GB-cori-medium": "en/en_GB/cori/medium/en_GB-cori-medium.onnx",
-    "en_US-bryce-medium": "en/en_US/bryce/medium/en_US-bryce-medium.onnx",
-}
-
-
 def cache_voices_dir() -> Path:
     """Local cache where downloaded voices are materialized (flat names)."""
     override = os.environ.get("TALKTOMECLAUDE_VOICES_CACHE")
@@ -90,9 +44,9 @@ def cache_voices_dir() -> Path:
     return Path.home() / ".cache" / "talktomeclaude" / "voices"
 
 
-def _download_voice(voice: "Voice", on_status=None) -> tuple[Path, Path]:
-    rel = _HF_VOICE_PATHS.get(voice.name)
-    if rel is None:
+def _download_voice(voice: Voice, on_status=None) -> tuple[Path, Path]:
+    rel = voice.params.get("hf_path")
+    if not rel:
         raise TTSError(f"no download source registered for voice {voice.name!r}")
     dest = cache_voices_dir()
     model_dst = voice.model_path(dest)
@@ -119,12 +73,24 @@ def _download_voice(voice: "Voice", on_status=None) -> tuple[Path, Path]:
     return model_dst, config_dst
 
 
-def voice_files(voice: "Voice", on_status=None) -> tuple[Path, Path]:
-    """Resolve (model, config) paths for *voice*, fetching on demand.
+def voice_files(voice: Voice, on_status=None) -> tuple[Path, Path]:
+    """Resolve (model, config) paths for a Piper *voice*, fetching on demand.
 
-    Resolution order: a bundled/override ``voices/`` directory (offline use),
-    then the local download cache, then a one-time download from the Hub.
+    A bring-your-own voice carries explicit ``model``/``config`` paths in its
+    params and is used in place. A bundled voice resolves in order: the
+    bundled/override ``voices/`` directory (offline), the local download cache,
+    then a one-time download from the Hub.
     """
+    model = voice.params.get("model")
+    config = voice.params.get("config")
+    if model and config:
+        model_path, config_path = Path(model), Path(config)
+        if not model_path.is_file() or not config_path.is_file():
+            raise TTSError(
+                f"registered voice {voice.name!r} points at missing files "
+                f"({model_path} / {config_path})"
+            )
+        return model_path, config_path
     bundled = voices_dir()
     if voice.is_installed(bundled):
         return voice.model_path(bundled), voice.config_path(bundled)
@@ -134,17 +100,52 @@ def voice_files(voice: "Voice", on_status=None) -> tuple[Path, Path]:
     return _download_voice(voice, on_status)
 
 
-def is_available(voice: "Voice") -> bool:
-    """True if the voice is already on disk (bundled or cached) — no download needed."""
+def is_available(voice: Voice) -> bool:
+    """True if the voice is usable now (Piper voices: no download needed; a
+    clone: the reference clip is present and the cloning engine is installed —
+    model weights may still download on first use)."""
+    if voice.engine == "clone":
+        reference = voice.params.get("reference")
+        if not (reference and Path(reference).is_file()):
+            return False
+        try:
+            from talktomeclaude import clone
+
+            return clone.clone_available()
+        except Exception:
+            return False
+    model = voice.params.get("model")
+    config = voice.params.get("config")
+    if model and config:
+        return Path(model).is_file() and Path(config).is_file()
     return voice.is_installed(voices_dir()) or voice.is_installed(cache_voices_dir())
 
 
 def get_voice(name: str) -> Voice:
+    """Resolve *name* to a Voice: a bundled voice, else a registered one."""
     for voice in BUNDLED_VOICES:
         if voice.name == name:
             return voice
-    known = ", ".join(v.name for v in BUNDLED_VOICES)
-    raise TTSError(f"unknown voice {name!r} (bundled voices: {known})")
+    try:
+        registered = registry.get(name)
+    except registry.RegistryError as exc:
+        raise TTSError(str(exc)) from exc
+    if registered is not None:
+        quality = "n/a" if registered.engine == "clone" else "medium"
+        return Voice(
+            name=registered.name,
+            language=registered.language,
+            quality=quality,
+            license=registered.license,
+            provenance=registered.provenance,
+            engine=registered.engine,
+            params=dict(registered.params),
+        )
+    bundled = ", ".join(v.name for v in BUNDLED_VOICES)
+    registered_names = ", ".join(v.name for v in registry.list_voices()) or "none"
+    raise TTSError(
+        f"unknown voice {name!r} (bundled: {bundled}; registered: {registered_names})"
+    )
 
 
 def _hardware_allows_high_tier() -> bool:
@@ -160,6 +161,13 @@ def _hardware_allows_high_tier() -> bool:
 
 
 def default_voice(directory: Path | None = None) -> Voice:
+    """The best bundled Piper voice for this machine.
+
+    Deliberately bundled-only: this is what the per-turn Stop hook speaks with,
+    so it must never be a clone (a fresh subprocess must not load 2 GB and touch
+    the GPU every turn). A user's cloned default is used only where it is named
+    explicitly (the persistent ``listen`` loop and ``speak --voice``).
+    """
     directory = directory or voices_dir()
     cache = cache_voices_dir()
     # Prefer a voice already on disk (bundled or cached) so the default never
@@ -187,6 +195,22 @@ def _piper_executable() -> str:
     )
 
 
+def _synthesize_clone(text: str, out_path: Path, voice: Voice) -> Voice:
+    from talktomeclaude import clone  # optional engine, imported lazily
+
+    reference = voice.params.get("reference")
+    if not reference:
+        raise TTSError(f"cloned voice {voice.name!r} has no reference clip")
+    clone.synthesize_clone(
+        text,
+        Path(out_path),
+        reference,
+        exaggeration=voice.params.get("exaggeration", 0.5),
+        cfg_weight=voice.params.get("cfg_weight", 0.5),
+    )
+    return voice
+
+
 def synthesize(
     text: str,
     out_path: Path,
@@ -195,11 +219,13 @@ def synthesize(
 ) -> Voice:
     """Render *text* to a WAV file at *out_path*, fully locally.
 
-    Returns the voice used. The voice files are resolved on demand (bundled,
-    cached, or downloaded once from the Hub); Piper then runs as a subprocess
-    only (GPL isolation).
+    Returns the voice used. Piper voices (bundled or bring-your-own) run through
+    the ``piper`` subprocess only (GPL isolation); a cloned voice dispatches to
+    the optional clone engine.
     """
     voice = get_voice(voice_name) if voice_name else default_voice()
+    if voice.engine == "clone":
+        return _synthesize_clone(text, Path(out_path), voice)
     model_path, config_path = voice_files(voice, on_status)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(

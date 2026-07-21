@@ -111,3 +111,32 @@ def set_remote_cwd(value: str | None) -> None:
         settings = load()
         settings.pop("remote-cwd", None)
         save(settings)
+
+
+def barge_in_enabled() -> bool:
+    """Whether the listen loop may be interrupted while Claude is still
+    speaking. Off by default: half-duplex is safe on every machine, and
+    full-duplex barge-in is opt-in and gated on capable audio hardware."""
+    return load().get("barge-in", "off") == "on"
+
+
+def set_barge_in(enabled: bool) -> None:
+    set_value("barge-in", "on" if enabled else "off")
+
+
+def default_voice_name() -> str | None:
+    """The user's chosen default voice, or None to auto-select the best
+    available voice. The name is validated against the registry when it is
+    used, not here, so a removed voice degrades gracefully to auto-select."""
+    value = load().get("default-voice")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def set_default_voice(value: str | None) -> None:
+    """Persist the default voice name, or clear it (auto-select) when empty."""
+    if value and value.strip():
+        set_value("default-voice", value.strip())
+    else:
+        settings = load()
+        settings.pop("default-voice", None)
+        save(settings)
