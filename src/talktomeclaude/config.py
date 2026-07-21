@@ -94,3 +94,20 @@ def set_remote(value: str | None) -> None:
         settings = load()
         settings.pop("remote", None)
         save(settings)
+
+
+def remote_cwd() -> str | None:
+    """The persisted project directory for remote Claude sessions, or None
+    to use the remote login shell's home directory."""
+    value = load().get("remote-cwd")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def set_remote_cwd(value: str | None) -> None:
+    """Persist the remote project directory, or clear it when empty."""
+    if value and value.strip():
+        set_value("remote-cwd", value)
+    else:
+        settings = load()
+        settings.pop("remote-cwd", None)
+        save(settings)
