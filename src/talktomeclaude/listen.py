@@ -477,6 +477,7 @@ def _prompt_claude(
     remote: str | None = None,
     remote_cwd: str | None = None,
     on_wait: Callable[[], None] | None = None,
+    on_event: "Callable[[dict], None] | None" = None,
 ) -> tuple[str, str | None]:
     """Primary injection path (D-3): drive a claude -p session, resuming it
     across turns; the reply arrives as structured JSON.
@@ -486,9 +487,17 @@ def _prompt_claude(
     Claude Code runs on the server. The remote command runs through a login
     shell so the server's normal PATH finds the ``claude`` CLI. When
     *remote_cwd* is set, Claude starts in that safely quoted project directory.
+
+    When *on_event* is given, the session runs with ``--output-format
+    stream-json`` and every activity event (tool calls, thinking, results) is
+    surfaced live for the dashboard's session mirror; the spoken reply still
+    comes only from the authoritative final ``result`` event.
     """
+    fmt = "stream-json" if on_event is not None else "json"
     if remote:
-        inner = f"claude -p {shlex.quote(text)} --output-format json"
+        inner = f"claude -p {shlex.quote(text)} --output-format {fmt}"
+        if on_event is not None:
+            inner += " --verbose"
         if session_id:
             inner += f" --resume {shlex.quote(session_id)}"
         command = _ssh_base(remote) + [_remote_shell_command(inner, remote_cwd)]
@@ -499,9 +508,13 @@ def _prompt_claude(
                 "the claude CLI is not on PATH; install Claude Code, pass "
                 "--remote user@host to run it on a server, or use --tmux-pane"
             )
-        command = [claude, "-p", text, "--output-format", "json"]
+        command = [claude, "-p", text, "--output-format", fmt]
+        if on_event is not None:
+            command += ["--verbose"]
         if session_id:
             command += ["--resume", session_id]
+    if on_event is not None:
+        return _consume_stream(command, on_event, on_wait, remote)
     try:
         result = _run_captured(command, on_wait=on_wait)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -588,6 +601,97 @@ def _run_captured(
     )
 
 
+def _consume_stream(
+    command: list[str],
+    on_event: "Callable[[dict], None]",
+    on_wait: Callable[[], None] | None,
+    remote: str | None,
+) -> tuple[str, str | None]:
+    """Run a ``claude -p --output-format stream-json`` session, surfacing each
+    NDJSON event live via *on_event*, and return only the authoritative final
+    ``result`` text plus its session id.
+
+    stderr is drained on a side thread so a full pipe can never deadlock the
+    reader; unknown event types and malformed lines are tolerated rather than
+    fatal (Codex review). The command is never given a PTY, so the stream stays
+    clean NDJSON even over SSH.
+    """
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ListenError(f"could not run claude -p: {exc}") from exc
+
+    stderr_chunks: list[str] = []
+
+    def drain_stderr() -> None:
+        if process.stderr is not None:
+            for chunk in process.stderr:
+                stderr_chunks.append(chunk)
+
+    stderr_worker = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_worker.start()
+
+    result_text = ""
+    session_id: str | None = None
+    got_result = False
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            if on_wait is not None:
+                on_wait()
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict):
+                continue
+            try:
+                on_event(event)
+            except Exception:
+                pass
+            etype = event.get("type")
+            if etype == "system" and event.get("subtype") == "init":
+                session_id = event.get("session_id") or session_id
+            elif etype == "result":
+                got_result = True
+                reply = event.get("result")
+                result_text = reply if isinstance(reply, str) else ""
+                session_id = event.get("session_id") or session_id
+    except BaseException:
+        process.terminate()
+        raise
+    finally:
+        process.wait()
+        stderr_worker.join(1.0)
+
+    if process.returncode != 0:
+        detail = "".join(stderr_chunks).strip() or f"exit {process.returncode}"
+        where = f" on {remote}" if remote else ""
+        raise ListenError(
+            f"claude -p failed{where}: {detail}"
+            + (
+                "  (remote needs passwordless SSH keys and the claude CLI installed there)"
+                if remote
+                else ""
+            )
+        )
+    if not got_result:
+        raise ListenError("claude -p stream ended without a result event")
+    return result_text, session_id
+
+
 def _send_tmux(pane: str, text: str, remote: str | None = None) -> None:
     """Alternate injection path (D-3): type into a live interactive TUI.
 
@@ -635,6 +739,7 @@ def run_listen(
     start_recording: bool = False,
     keys: "_RawKeys | None" = None,
     stop_event: "threading.Event | None" = None,
+    on_event: "Callable[[dict], None] | None" = None,
 ) -> None:
     """Drive the capture → transcribe → inject → reply loop until interrupted.
 
@@ -717,6 +822,7 @@ def run_listen(
                 remote=remote,
                 remote_cwd=remote_cwd,
                 on_wait=on_progress,
+                on_event=on_event,
             )
             dialogue = speakable(reply)
             if dialogue:

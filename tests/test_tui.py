@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -143,6 +144,27 @@ class VoiceBridgeTests(_ConfigIsolation):
                 self.assertIn("microphone unavailable", app.notice)
                 self.assertFalse(app._voice_running)
 
+    async def test_mirror_events_render_in_session_panel(self) -> None:
+        def fake(**kwargs):
+            kwargs["on_event"]({"type": "system", "subtype": "init", "model": "opus", "tools": []})
+            kwargs["on_event"]({
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Grep", "input": {"pattern": "TODO"}}]},
+            })
+
+        with mock.patch.object(tui, "run_listen", fake):
+            app = TalkToMeApp(lambda _text: None)
+            async with app.run_test(size=(120, 34)) as pilot:
+                await pilot.pause()
+                await pilot.press("space")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                lines = " ".join(
+                    strip.text for strip in app.query_one("#session", tui.RichLog).lines
+                )
+                self.assertIn("Grep", lines)
+                self.assertIn("session · opus", lines)
+
     async def test_escape_stops_a_running_session(self) -> None:
         def fake(**kwargs):
             kwargs["keys"].read_key(None)  # blocks until stop() raises
@@ -253,6 +275,85 @@ class InjectedKeysTests(unittest.TestCase):
                 stop_event=event,
             )
         captured.assert_not_called()
+
+
+class MirrorFormatTests(unittest.TestCase):
+    def test_init_and_result_markers(self) -> None:
+        self.assertEqual(
+            tui._mirror_lines({"type": "system", "subtype": "init", "model": "opus", "tools": ["a", "b"]}),
+            [("mark", "● session · opus · 2 tools")],
+        )
+        done = tui._mirror_lines({"type": "result", "is_error": False, "duration_ms": 8423})
+        self.assertEqual(done, [("mark", "● done · 8423 ms")])
+
+    def test_tool_use_and_tool_result(self) -> None:
+        used = tui._mirror_lines({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}}]},
+        })
+        self.assertEqual(used, [("tool", "▸ Bash  ls -la")])
+        out = tui._mirror_lines({
+            "type": "user",
+            "message": {"content": [{"type": "tool_result", "content": "output here"}]},
+        })
+        self.assertEqual(out, [("out", "  ↳ output here")])
+
+    def test_unknown_event_and_truncation(self) -> None:
+        self.assertEqual(tui._mirror_lines({"type": "rate_limit_event"}), [])
+        used = tui._mirror_lines({
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "x" * 500}}]},
+        })
+        self.assertLessEqual(len(used[0][1]), 130)
+        self.assertTrue(used[0][1].endswith("…"))
+
+
+class _FakeProc:
+    def __init__(self, lines, returncode=0, stderr=""):
+        self.stdout = iter(lines)
+        self.stderr = iter([stderr] if stderr else [])
+        self.returncode = None
+        self._rc = returncode
+
+    def wait(self):
+        self.returncode = self._rc
+
+    def terminate(self):
+        self.returncode = self._rc
+
+
+class StreamConsumeTests(unittest.TestCase):
+    def _lines(self, *events):
+        return [json.dumps(event) + "\n" for event in events]
+
+    def test_extracts_result_and_forwards_events(self) -> None:
+        lines = self._lines(
+            {"type": "system", "subtype": "init", "session_id": "sess1", "model": "m", "tools": []},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}},
+        )
+        lines += ["\n", "not json\n"]  # blank + malformed tolerated
+        lines += self._lines(
+            {"type": "result", "subtype": "success", "result": "all done", "session_id": "sess1", "duration_ms": 10}
+        )
+        seen = []
+        with mock.patch.object(listen.subprocess, "Popen", return_value=_FakeProc(lines)):
+            result, session = listen._consume_stream(["claude"], seen.append, None, None)
+        self.assertEqual(result, "all done")
+        self.assertEqual(session, "sess1")
+        self.assertEqual([event["type"] for event in seen], ["system", "assistant", "result"])
+
+    def test_raises_on_nonzero_exit_with_stderr(self) -> None:
+        with mock.patch.object(
+            listen.subprocess, "Popen", return_value=_FakeProc(["\n"], returncode=1, stderr="kaboom")
+        ):
+            with self.assertRaisesRegex(listen.ListenError, "kaboom"):
+                listen._consume_stream(["claude"], lambda _event: None, None, None)
+
+    def test_raises_when_stream_has_no_result(self) -> None:
+        lines = self._lines({"type": "assistant", "message": {"content": []}})
+        with mock.patch.object(listen.subprocess, "Popen", return_value=_FakeProc(lines)):
+            with self.assertRaisesRegex(listen.ListenError, "without a result"):
+                listen._consume_stream(["claude"], lambda _event: None, None, None)
 
 
 class RemoteProjectTests(unittest.TestCase):

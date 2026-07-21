@@ -202,10 +202,15 @@ Screen { background: $background; color: $foreground; layout: vertical; }
 #status.-speaking { color: $phase-speaking; }
 #status.-error { color: $phase-error; }
 
-#dialogue { height: 1fr; }
+#body { height: 1fr; }
+#dialogue { width: 1fr; }
+#session { width: 2fr; }
 
 /* In compact the band renders a single wordmark line (HeaderBand.compact); it
-   stays visible so the brand identity survives on small terminals. */
+   stays visible so the brand identity survives on small terminals. The body
+   also stacks so both panels keep a usable width. */
+.-compact #body { layout: vertical; }
+.-compact #dialogue, .-compact #session { width: 1fr; height: 1fr; }
 
 ModalScreen { align: center middle; }
 .modal {
@@ -431,6 +436,83 @@ class Progress(Message):
     pass
 
 
+class Mirror(Message):
+    def __init__(self, event: dict) -> None:
+        self.event = event
+        super().__init__()
+
+
+# ── live session-mirror formatting (stream-json events → styled lines) ────────
+_MIRROR_STYLES = {
+    "mark": _OCHRE,
+    "tool": f"bold {_AMBER}",
+    "thinking": _GRAY,
+    "text": _CREAM,
+    "out": "#8f8269",
+}
+
+
+def _truncate(value: object, limit: int = 110) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _brief_input(inp: object) -> str:
+    if isinstance(inp, dict):
+        for key in ("command", "file_path", "path", "pattern", "url", "query", "description"):
+            if inp.get(key):
+                return _truncate(inp[key])
+        if inp:
+            return _truncate(", ".join(f"{k}={v}" for k, v in inp.items()))
+    return ""
+
+
+def _brief_result(content: object) -> str:
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        content = " ".join(parts)
+    return _truncate(content)
+
+
+def _mirror_lines(event: dict) -> list[tuple[str, str]]:
+    """Turn one claude stream-json event into styled mirror lines. Unknown event
+    types yield nothing (tolerated, not fatal). Tool I/O is truncated so a huge
+    file dump or a secret can't flood or leak into the panel."""
+    etype = event.get("type")
+    if etype == "system" and event.get("subtype") == "init":
+        model = event.get("model") or "claude"
+        tools = len(event.get("tools") or [])
+        return [("mark", f"● session · {model} · {tools} tools")]
+    if etype == "assistant":
+        lines: list[tuple[str, str]] = []
+        for block in (event.get("message") or {}).get("content", []) or []:
+            btype = block.get("type")
+            if btype == "tool_use":
+                lines.append(("tool", f"▸ {block.get('name', 'tool')}  {_brief_input(block.get('input'))}"))
+            elif btype == "thinking":
+                lines.append(("thinking", "· thinking…"))
+            elif btype == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    lines.append(("text", _truncate(text, 200)))
+        return lines
+    if etype == "user":
+        lines = []
+        for block in (event.get("message") or {}).get("content", []) or []:
+            if block.get("type") == "tool_result":
+                lines.append(("out", "  ↳ " + _brief_result(block.get("content"))))
+        return lines
+    if etype == "result":
+        marker = "error" if event.get("is_error") else "done"
+        return [("mark", f"● {marker} · {int(event.get('duration_ms') or 0)} ms")]
+    return []
+
+
 class TalkToMeApp(App[None]):
     """The interactive launcher and live voice-session dashboard."""
 
@@ -483,8 +565,11 @@ class TalkToMeApp(App[None]):
         with Container(id="signal", classes="panel"):
             yield Sparkline(list(self._levels), summary_function=max, id="vu")
         yield Static("", id="status", classes="status")
-        yield RichLog(id="dialogue", classes="panel", markup=False, wrap=True,
-                      max_lines=500, auto_scroll=True)
+        with Horizontal(id="body"):
+            yield RichLog(id="dialogue", classes="panel", markup=False, wrap=True,
+                          max_lines=500, auto_scroll=True)
+            yield RichLog(id="session", classes="panel", markup=False, wrap=True,
+                          max_lines=1000, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -498,6 +583,10 @@ class TalkToMeApp(App[None]):
         self.remote_cwd = config.remote_cwd()
         self.query_one("#signal").border_title = "SIGNAL"
         self.query_one("#dialogue").border_title = "DIALOGUE"
+        session = self.query_one("#session", RichLog)
+        session.border_title = "SESSION"
+        session.write(Text("Claude's live activity — tools, edits, thinking — appears here.",
+                           style=_GRAY))
         self._apply_compact(self.size.width, self.size.height)
         self._ui_ready = True
         self._paint_all()
@@ -656,6 +745,7 @@ class TalkToMeApp(App[None]):
                 on_level=lambda value: self.post_message(Level(value)),
                 on_phase=lambda phase: self.post_message(Phase(phase)),
                 on_progress=lambda: self.post_message(Progress()),
+                on_event=lambda event: self.post_message(Mirror(event)),
                 trigger_key=" ",
                 start_recording=self.mode == "push-toggle",
                 keys=self._keys,
@@ -724,6 +814,11 @@ class TalkToMeApp(App[None]):
     def on_progress(self, message: Progress) -> None:
         elapsed = max(0, int(time.monotonic() - self._thinking_started))
         self.notice = f"Claude is working ({elapsed}s)"
+
+    def on_mirror(self, message: Mirror) -> None:
+        log = self.query_one("#session", RichLog)
+        for style_key, text in _mirror_lines(message.event):
+            log.write(Text(text, style=_MIRROR_STYLES.get(style_key, _CREAM)))
 
     # ── actions: settings & navigation ───────────────────────────────────────
     def action_mode(self) -> None:
