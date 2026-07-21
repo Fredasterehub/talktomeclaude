@@ -187,6 +187,7 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse((registry.refs_dir() / "rick.wav").exists())
 
     # --- second-pass review fixes ----------------------------------------- #
+    @unittest.skipUnless(os.name == "posix", "Unix file-permission bits")
     def test_clone_reference_stored_private_0600(self) -> None:
         voice = registry.add_clone("rick", self._make_ref())
         stored = Path(voice.params["reference"])
