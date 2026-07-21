@@ -40,7 +40,7 @@ class CudaLibraryTests(unittest.TestCase):
             dll_handles = [object(), object()]
 
             with mock.patch.object(os, "name", "nt"), mock.patch.dict(
-                sys.modules, {"nvidia": nvidia}
+                sys.modules, {"nvidia": nvidia, "torch": SimpleNamespace()}
             ), mock.patch.dict(
                 os.environ, {"PATH": "existing-path"}
             ), mock.patch.object(
@@ -62,6 +62,28 @@ class CudaLibraryTests(unittest.TestCase):
                 {Path(path) for path in process_path[:2]}, {cublas_bin, cudnn_bin}
             )
             self.assertEqual(process_path[2], "existing-path")
+
+    def test_windows_cuda_torch_avoids_conflicting_nvidia_dll_preload(self) -> None:
+        torch = SimpleNamespace(version=SimpleNamespace(cuda="12.8"))
+        nvidia = SimpleNamespace(__path__=["unused"])
+
+        with mock.patch.object(os, "name", "nt"), mock.patch.dict(
+            sys.modules, {"nvidia": nvidia, "torch": torch}
+        ), mock.patch.object(
+            os, "add_dll_directory", create=True
+        ) as add_directory, mock.patch.object(
+            stt.ctypes, "WinDLL", create=True
+        ) as load_library:
+            stt._preload_cuda_libraries()
+
+        add_directory.assert_not_called()
+        load_library.assert_not_called()
+
+    def test_cuda_detection_degrades_when_windows_dll_loading_fails(self) -> None:
+        with mock.patch.object(
+            stt, "_preload_cuda_libraries", side_effect=OSError("bad CUDA DLL")
+        ):
+            self.assertFalse(stt.cuda_available())
 
     def test_explicit_cuda_preloads_libraries(self) -> None:
         with mock.patch.object(stt, "_preload_cuda_libraries") as preload:

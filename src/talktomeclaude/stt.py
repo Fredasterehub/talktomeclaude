@@ -55,9 +55,21 @@ def _preload_cuda_libraries() -> None:
     """Make the pip-shipped CUDA runtime visible to CTranslate2.
 
     The nvidia-cublas/nvidia-cudnn wheels install libraries outside the
-    loader's default search path. Register their bin directories on Windows,
-    or load their shared objects RTLD_GLOBAL on POSIX.
+    loader's default search path. On Windows, a CUDA-enabled Torch install
+    already loads a complete compatible CUDA/cuDNN set; use it for both Torch
+    and CTranslate2 instead of loading a second, potentially incompatible
+    cuDNN from the NVIDIA wheels. Without CUDA Torch, register the NVIDIA bin
+    directories. POSIX loads the wheel-provided shared objects RTLD_GLOBAL.
     """
+    if os.name == "nt":
+        try:
+            import torch
+        except (ImportError, OSError):
+            pass
+        else:
+            if getattr(getattr(torch, "version", None), "cuda", None):
+                return
+
     try:
         import nvidia
     except ImportError:
@@ -124,10 +136,10 @@ def _preload_cuda_libraries() -> None:
 
 
 def cuda_available() -> bool:
-    _preload_cuda_libraries()
     try:
+        _preload_cuda_libraries()
         import ctranslate2
-    except ImportError:
+    except (ImportError, OSError):
         return False
     try:
         return ctranslate2.get_cuda_device_count() > 0
@@ -137,7 +149,7 @@ def cuda_available() -> bool:
 
 def detect_tier(device: str = "auto", model: str | None = None) -> STTTier:
     """Resolve the active tier (D-1): auto-detected, with a manual override."""
-    if device in {"auto", "cuda"}:
+    if device == "cuda":
         _preload_cuda_libraries()
     if device == "auto":
         tier = GPU_TIER if cuda_available() else CPU_TIER
