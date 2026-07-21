@@ -65,6 +65,25 @@ differently. Pick your platform below.
 
 ## Install
 
+### First: where will Claude Code run?
+
+talktomeclaude is modular — it fits whatever setup you have. There are two, and
+they change what you install where:
+
+- **All on one computer** — your Mac or PC laptop has the microphone *and* the
+  speakers, *and* you run Claude Code on it. This is the simple case: follow your
+  platform below and you're done, no extra config.
+- **Voice on your computer, Claude on a server** — you sit at a laptop (mic +
+  speakers) but you **SSH into a Linux box** (Proxmox, a homelab server, a VPS)
+  and do your actual coding *there*. A server reached over SSH has **no
+  microphone and no speakers**, so the voice has to run on your laptop while
+  Claude runs on the server, with only text crossing the network. This works —
+  jump to **[Talking to Claude on a remote server](#talking-to-claude-on-a-remote-server-ssh--proxmox)**
+  after you've installed on your laptop.
+
+Either way you start by installing on the machine you physically sit at. Pick
+its platform:
+
 ### Windows — Windows Terminal (PowerShell)
 
 For a complete beginner on Windows 10/11, using **Windows Terminal** with the
@@ -215,6 +234,66 @@ For a beginner on Ubuntu/Debian. Fedora and Arch equivalents are on each line.
 
 ---
 
+## Talking to Claude on a remote server (SSH / Proxmox)
+
+This is for the split setup: you sit at a **Windows or Mac computer** with a
+microphone and speakers, and you **SSH into a Linux server** (Proxmox, homelab,
+VPS) where you run Claude Code. The voice runs on your computer; Claude runs on
+the server; only text goes over SSH. Here's the whole thing, top to bottom.
+
+**On the SERVER** (inside your SSH session — Claude lives here):
+
+1. **Install Claude Code** if it isn't already, and log in once so it's ready:
+   ```bash
+   claude --version    # confirm it's installed and on PATH
+   claude              # run it once interactively to log in, then exit
+   ```
+   The server needs **only Claude Code** — no talktomeclaude, no audio, nothing else.
+
+**On YOUR COMPUTER** (Windows or Mac — the mic and speakers live here):
+
+2. **Install talktomeclaude** by following your platform guide above (Windows or macOS).
+
+3. **Set up passwordless SSH** to the server, so the voice loop never stops to ask
+   for a password mid-sentence. In Windows Terminal (PowerShell) or Mac Terminal:
+   ```bash
+   ssh-keygen -t ed25519        # press Enter through every prompt (no passphrase)
+   ssh-copy-id you@192.168.2.122 # macOS/Linux; copies your key to the server
+   ```
+   On **Windows**, `ssh-copy-id` may not exist — use this one line instead:
+   ```powershell
+   type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh you@192.168.2.122 "cat >> ~/.ssh/authorized_keys"
+   ```
+   Then test it — this must print `ok` with **no password prompt**:
+   ```bash
+   ssh you@192.168.2.122 echo ok
+   ```
+   *(Replace `you@192.168.2.122` with your server login and IP.)*
+
+4. **Tell talktomeclaude where the server is** — just once; it's remembered:
+   ```bash
+   talktomeclaude config set remote you@192.168.2.122
+   ```
+
+5. **Talk.** From your computer:
+   ```bash
+   talktomeclaude listen
+   ```
+   Your mic is captured and transcribed **on your computer**, the text is sent to
+   Claude Code **on the server**, and Claude's reply is spoken back through **your
+   speakers**. (Prefer not to persist it? Skip step 4 and run
+   `talktomeclaude listen --remote you@192.168.2.122` instead.)
+
+**To switch back to all-local** (mic + Claude + speakers on one machine):
+```bash
+talktomeclaude config set remote local
+```
+
+> Two things the server needs: Claude Code **logged in**, and the `claude` command
+> reachable from a non-interactive SSH shell (it's run through a login shell, so a
+> normal install on `PATH` works). If a sentence errors with "claude -p failed",
+> check `ssh you@server claude --version` works.
+
 ## Talk to it — the commands
 
 `talktomeclaude` (or `./.venv/bin/talktomeclaude`, or `.\.venv\Scripts\talktomeclaude` on Windows):
@@ -222,11 +301,11 @@ For a beginner on Ubuntu/Debian. Fedora and Arch equivalents are on each line.
 | Command | What it does |
 |---|---|
 | `speak "text"` | Synthesize and play a line locally. `--out file.wav` writes instead of plays; `--voice NAME` picks a voice. |
-| `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--tmux-pane` to type into a live TUI. |
+| `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--tmux-pane` to type into a live TUI. |
 | `transcribe FILE` | Local speech-to-text on an audio file. `--device auto\|cuda\|cpu`, `--show-tier` to see which model runs. |
 | `filter TRANSCRIPT.jsonl` | Print only Claude's spoken dialogue from a transcript (`-` for stdin) — the core "dialogue, never code" filter. |
-| `voices` | List the three bundled voices, their licenses, and which is the default for your hardware. |
-| `config set\|get KEY VALUE` | Persist settings. Keys: `recording-mode`, `voice-assist`. |
+| `voices` | List the voices, their licenses, and which is the default for your hardware. `--download` pre-fetches them all. |
+| `config set\|get KEY VALUE` | Persist settings. Keys: `recording-mode`, `voice-assist`, `remote` (`user@host`, or `local` to clear). |
 | `assist on\|off\|status` | The full mute switch. `off` silences the Stop hook and all spoken replies. |
 
 **Recording modes** — set your default once:

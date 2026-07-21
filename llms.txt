@@ -8,7 +8,7 @@ name: talktomeclaude
 description: Local-first voice medium for Claude Code. You speak (local Whisper-class STT); Claude answers back in a real voice speaking ONLY its dialogue (never tool calls, code, or logs) via a Claude Code plugin Stop hook.
 repo: https://github.com/Fredasterehub/talktomeclaude
 license: MIT
-version: 0.1
+version: 0.0.1
 entrypoint: talktomeclaude   # console script installed into the venv
 ```
 
@@ -73,15 +73,32 @@ permanent: '/plugin install .'          # run INSIDE Claude Code to keep it
 mute:      'talktomeclaude assist off'  # full mute (hook stays silent); 'assist on' to re-enable
 ```
 
+## TOPOLOGY
+```yaml
+# Modular — accommodates any install. Pick per machine:
+all_local:
+  desc: "mic + Claude Code + speakers all on ONE machine (e.g. a Mac/PC laptop)."
+  setup: "default; no extra config. Just `talktomeclaude listen`."
+remote_ssh:
+  desc: "voice on the machine you sit at; Claude Code runs on a server (e.g. SSH into Proxmox/VPS). Server needs NO audio; client needs NO Claude Code."
+  how: "mic capture + STT + spoken reply stay local; only text crosses SSH (multiplexed connection). claude runs on the server via `ssh user@host bash -lc 'claude -p ...'`."
+  setup:
+    - "server: install + log into Claude Code (claude --version works)."
+    - "client: install talktomeclaude; set up passwordless SSH keys to the server (required, or it prompts every utterance)."
+    - "client: talktomeclaude config set remote user@host   # persist once"
+    - "client: talktomeclaude listen                        # or per-run: listen --remote user@host"
+  revert: "talktomeclaude config set remote local"
+```
+
 ## USAGE
 ```yaml
 commands:
   speak:      'talktomeclaude speak "text" [--out file.wav] [--voice NAME]'
-  listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--once]'
+  listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--remote user@host] [--once]'
   transcribe: 'talktomeclaude transcribe AUDIO [--device auto|cuda|cpu] [--show-tier]'
   filter:     'talktomeclaude filter transcript.jsonl'   # prints only spoken dialogue (never code/tools)
   voices:     'talktomeclaude voices [--download]'       # list voices + licenses; --download pre-fetches all
-  config:     'talktomeclaude config set|get recording-mode|voice-assist VALUE'
+  config:     'talktomeclaude config set|get recording-mode|voice-assist|remote VALUE'
   assist:     'talktomeclaude assist on|off|status'
 default_recording_mode: push-to-talk
 ```

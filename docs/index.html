@@ -326,6 +326,9 @@
     <div class="caveat">
       <b class="k">Plug into Claude Code</b> &nbsp;·&nbsp; <code>claude --plugin-dir .</code> to test, or <code>/plugin install .</code> inside Claude Code to keep it. On <b>native Windows</b> the spoken-reply Stop hook is a bash script — install Git for Windows (<code>winget install --id Git.Git -e</code>) so Claude Code routes it through Git Bash. Everything else works either way. First transcription pulls a Whisper model once (~486&nbsp;MB CPU · ~3&nbsp;GB GPU), then caches forever.
     </div>
+    <div class="caveat">
+      <b class="k">Coding on a server over SSH?</b> &nbsp;·&nbsp; Voice needs a mic and speakers, and a server reached over SSH has neither — so run it split: install talktomeclaude on the <b>laptop you sit at</b>, install Claude Code on the <b>server</b>, then <code>talktomeclaude config set remote you@server</code>. Your mic and the spoken reply stay local; Claude runs on the server; only text crosses SSH. One tool, any setup — Mac laptop, or laptop&#8594;Proxmox.
+    </div>
   </div>
 </section>
 

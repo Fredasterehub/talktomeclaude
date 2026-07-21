@@ -2,11 +2,16 @@
 
 Injection strategy (directive D-3): the primary path drives ``claude -p`` with
 ``--resume`` so the voice loop owns its own session and every reply comes back
-as structured JSON for the dialogue-only filter — no tmux requirement, works
-over SSH and headless. The alternate path types the transcript into a live
-interactive Claude Code TUI pane via ``tmux send-keys``. One driver per
-session: a session owned by the voice loop is never simultaneously driven
-from a live interactive window.
+as structured JSON for the dialogue-only filter — no tmux requirement. The
+alternate path types the transcript into a live interactive Claude Code TUI
+pane via ``tmux send-keys``. One driver per session: a session owned by the
+voice loop is never simultaneously driven from a live interactive window.
+
+Remote/SSH (``remote=user@host``): the microphone, transcription and spoken
+reply stay on the machine the operator sits at, while Claude Code runs on the
+server — either injection path is tunnelled over a multiplexed SSH connection.
+This is the headless-server pattern (e.g. a laptop driving Claude Code on a
+Proxmox box): the server needs no audio hardware, the client needs no Claude.
 
 Recording modes (locked vocabulary): ``always-on`` segments hands-free at
 pauses with VAD-gated transcription; ``push-to-talk`` records while a key is
@@ -19,6 +24,7 @@ the TTS voice and re-transcribes it as a prompt.
 import json
 import os
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -263,21 +269,57 @@ def _record_always_on() -> "object | None":
     return _finish(chunks)
 
 
-def _prompt_claude(text: str, session_id: str | None) -> tuple[str, str | None]:
+def _ssh_base(remote: str) -> list[str]:
+    """SSH invocation with a multiplexed, persistent connection so every
+    utterance after the first reuses one already-open session (low latency)."""
+    return [
+        "ssh",
+        "-o", "ConnectTimeout=10",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPath=~/.ssh/cm-talktomeclaude-%r@%h:%p",
+        "-o", "ControlPersist=600",
+        remote,
+    ]
+
+
+def _prompt_claude(
+    text: str, session_id: str | None, remote: str | None = None
+) -> tuple[str, str | None]:
     """Primary injection path (D-3): drive a claude -p session, resuming it
-    across turns; the reply arrives as structured JSON."""
-    claude = shutil.which("claude")
-    if claude is None:
-        raise ListenError(
-            "the claude CLI is not on PATH; install Claude Code or use --tmux-pane"
-        )
-    command = [claude, "-p", text, "--output-format", "json"]
-    if session_id:
-        command += ["--resume", session_id]
+    across turns; the reply arrives as structured JSON.
+
+    With *remote* set (``user@host``) the claude process runs on that host over
+    SSH — the microphone, speech-to-text and spoken reply stay local, while
+    Claude Code runs on the server. The remote command runs through a login
+    shell so the server's normal PATH finds the ``claude`` CLI.
+    """
+    if remote:
+        inner = f"claude -p {shlex.quote(text)} --output-format json"
+        if session_id:
+            inner += f" --resume {shlex.quote(session_id)}"
+        command = _ssh_base(remote) + [f"bash -lc {shlex.quote(inner)}"]
+    else:
+        claude = shutil.which("claude")
+        if claude is None:
+            raise ListenError(
+                "the claude CLI is not on PATH; install Claude Code, pass "
+                "--remote user@host to run it on a server, or use --tmux-pane"
+            )
+        command = [claude, "-p", text, "--output-format", "json"]
+        if session_id:
+            command += ["--resume", session_id]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         detail = result.stderr.strip() or f"exit {result.returncode}"
-        raise ListenError(f"claude -p failed: {detail}")
+        where = f" on {remote}" if remote else ""
+        raise ListenError(
+            f"claude -p failed{where}: {detail}"
+            + (
+                "  (remote needs passwordless SSH keys and the claude CLI installed there)"
+                if remote
+                else ""
+            )
+        )
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -292,8 +334,25 @@ def _prompt_claude(text: str, session_id: str | None) -> tuple[str, str | None]:
     )
 
 
-def _send_tmux(pane: str, text: str) -> None:
-    """Alternate injection path (D-3): type into a live interactive TUI."""
+def _send_tmux(pane: str, text: str, remote: str | None = None) -> None:
+    """Alternate injection path (D-3): type into a live interactive TUI.
+
+    With *remote* set, the ``tmux send-keys`` runs on that host over SSH, so a
+    local voice loop can type into a Claude Code TUI running on the server.
+    """
+    if remote:
+        inner = (
+            f"tmux send-keys -t {shlex.quote(pane)} -l {shlex.quote(text)} && "
+            f"tmux send-keys -t {shlex.quote(pane)} Enter"
+        )
+        command = _ssh_base(remote) + [f"bash -lc {shlex.quote(inner)}"]
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as exc:
+            raise ListenError(
+                f"remote tmux send-keys to pane {pane!r} on {remote} failed: {exc}"
+            ) from exc
+        return
     if shutil.which("tmux") is None:
         raise ListenError("tmux is not on PATH; drop --tmux-pane to drive claude -p")
     try:
@@ -313,9 +372,18 @@ def run_listen(
     echo: Callable[[str], None],
     speak: Callable[[str], None],
     status: Callable[[str], None],
+    remote: str | None = None,
 ) -> None:
-    """Drive the capture → transcribe → inject → reply loop until interrupted."""
+    """Drive the capture → transcribe → inject → reply loop until interrupted.
+
+    When *remote* (``user@host``) is set, Claude Code runs on that host over
+    SSH while the microphone, transcription and spoken reply stay on this
+    machine — the remote/SSH pattern (voice where you sit, compute on the
+    server).
+    """
     transcriber = UtteranceTranscriber(device, model, on_status=status)
+    if remote:
+        status(f"remote: Claude Code runs on {remote} over SSH; voice stays local")
     prompts = {
         "always-on": "listening (hands-free); Ctrl-C to stop",
         "push-to-talk": "hold any key to talk; release to send; Ctrl-C to stop",
@@ -341,10 +409,10 @@ def run_listen(
             continue
         echo(f"you: {text}")
         if tmux_pane:
-            _send_tmux(tmux_pane, text)
+            _send_tmux(tmux_pane, text, remote=remote)
             status(f"sent to tmux pane {tmux_pane}; the live TUI owns the reply")
         else:
-            reply, session_id = _prompt_claude(text, session_id)
+            reply, session_id = _prompt_claude(text, session_id, remote=remote)
             dialogue = speakable(reply)
             if dialogue:
                 echo(f"claude: {dialogue}")

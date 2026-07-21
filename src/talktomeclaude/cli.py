@@ -206,6 +206,14 @@ def filter_command(transcript) -> None:
     help="Type transcripts into this live tmux pane via `tmux send-keys` instead of driving claude -p.",
 )
 @click.option(
+    "--remote",
+    "remote",
+    default=None,
+    help="Run Claude Code on a remote host over SSH (user@host): the mic, transcription and "
+    "spoken reply stay local; Claude runs on the server. Persist it with "
+    "`config set remote user@host`. Needs passwordless SSH keys and the claude CLI on the remote.",
+)
+@click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
     default="auto",
@@ -223,6 +231,7 @@ def listen(
     mode: str | None,
     session_id: str | None,
     tmux_pane: str | None,
+    remote: str | None,
     device: str,
     model_name: str | None,
     once: bool,
@@ -236,6 +245,10 @@ def listen(
     `tmux send-keys` instead. One driver per session: never point the voice
     loop and a live interactive window at the same session.
 
+    Runs anywhere: on the machine you sit at (mic, Claude, speakers all local —
+    the default), or split with --remote user@host so the voice stays local
+    while Claude Code runs on a server (the remote/SSH pattern).
+
     \b
     Recording modes (persist a default with `config set recording-mode`):
       always-on     hands-free capture, VAD-gated; an utterance ends at a pause
@@ -246,6 +259,7 @@ def listen(
     from talktomeclaude.listen import ListenError, run_listen
 
     active_mode = mode or config.recording_mode()
+    active_remote = remote or config.remote()
 
     def speak_reply(text: str) -> None:
         if not config.voice_assist_enabled():
@@ -272,6 +286,7 @@ def listen(
             echo=click.echo,
             speak=speak_reply,
             status=lambda message: click.echo(message, err=True),
+            remote=active_remote,
         )
     except ListenError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -290,8 +305,8 @@ def config() -> None:
 def config_set(key: str, value: str) -> None:
     """Persist KEY = VALUE.
 
-    Known keys: recording-mode (always-on, push-to-talk, push-toggle)
-    and voice-assist (on, off).
+    Known keys: recording-mode (always-on, push-to-talk, push-toggle),
+    voice-assist (on, off), and remote (user@host, or "local"/"none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -306,9 +321,11 @@ def config_set(key: str, value: str) -> None:
                 f"invalid voice-assist value {value!r}: expected on or off"
             )
         settings.set_voice_assist(value == "on")
+    elif key == "remote":
+        settings.set_remote(None if value.lower() in ("", "local", "none", "off") else value)
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode or voice-assist"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, or remote"
         )
     click.echo(f"{key} = {value}")
 
@@ -323,9 +340,11 @@ def config_get(key: str) -> None:
         click.echo(settings.recording_mode())
     elif key == "voice-assist":
         click.echo("on" if settings.voice_assist_enabled() else "off")
+    elif key == "remote":
+        click.echo(settings.remote() or "local")
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode or voice-assist"
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, or remote"
         )
 
 

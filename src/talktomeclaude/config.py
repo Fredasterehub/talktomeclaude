@@ -77,3 +77,20 @@ def voice_assist_enabled() -> bool:
 
 def set_voice_assist(enabled: bool) -> None:
     set_value("voice-assist", "on" if enabled else "off")
+
+
+def remote() -> str | None:
+    """The persisted SSH target (``user@host``) Claude Code runs on, or None
+    for a fully local install."""
+    value = load().get("remote")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def set_remote(value: str | None) -> None:
+    """Persist the SSH target, or clear it (local) when value is empty."""
+    if value and value.strip():
+        set_value("remote", value.strip())
+    else:
+        settings = load()
+        settings.pop("remote", None)
+        save(settings)
