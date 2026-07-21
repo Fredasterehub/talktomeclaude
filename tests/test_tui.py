@@ -89,6 +89,8 @@ class RemoteProjectTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[:2], ["ssh", "dev@example"])
         self.assertIn("find -- /DEV", command[-1])
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
 
     def test_project_discovery_reports_ssh_failure(self) -> None:
         completed = SimpleNamespace(returncode=255, stdout="", stderr="connection failed")

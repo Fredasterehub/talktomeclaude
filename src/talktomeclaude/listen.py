@@ -532,6 +532,8 @@ def _run_captured(
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
     }
     if on_wait is None:
         result = subprocess.run(command, **kwargs)

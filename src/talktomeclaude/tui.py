@@ -268,7 +268,13 @@ def discover_remote_projects(remote: str, root: str = "/DEV") -> list[str]:
         "-not -name '.*' -print"
     )
     command = _ssh_base(remote) + [_remote_shell_command(inner)]
-    result = subprocess.run(command, capture_output=True, text=True)
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     if result.returncode != 0:
         detail = result.stderr.strip() or f"SSH exited {result.returncode}"
         raise TUIError(f"Could not list {root}: {detail}")
@@ -281,7 +287,13 @@ def discover_remote_projects(remote: str, root: str = "/DEV") -> list[str]:
 def remote_directory_exists(remote: str, path: str) -> bool:
     inner = f"test -d -- {shlex.quote(path)}"
     command = _ssh_base(remote) + [_remote_shell_command(inner)]
-    return subprocess.run(command, capture_output=True, text=True).returncode == 0
+    return subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).returncode == 0
 
 
 def _prompt_text(

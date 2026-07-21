@@ -265,6 +265,8 @@ class SSHCommandTests(unittest.TestCase):
         progress.assert_called()
         self.assertIs(popen.call_args.kwargs["stdin"], listen.subprocess.DEVNULL)
         self.assertIs(popen.call_args.kwargs["stdout"], listen.subprocess.PIPE)
+        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(popen.call_args.kwargs["errors"], "replace")
 
 
 class TranscriberFallbackTests(unittest.TestCase):
