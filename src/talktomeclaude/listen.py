@@ -264,32 +264,52 @@ def _finish(chunks, minimum_seconds: float = _MIN_UTTERANCE_SECONDS):
     return audio
 
 
-def _record_push_to_talk(keys: _RawKeys) -> "object | None":
+def _wait_for_trigger(keys: _RawKeys, trigger_key: str | None) -> str | None:
+    while True:
+        key = keys.read_key(None)
+        if key is None or trigger_key is None or key == trigger_key:
+            return key
+
+
+def _report_level(block, on_level: Callable[[float], None] | None) -> None:
+    if on_level is not None:
+        on_level(_rms(block))
+
+
+def _record_push_to_talk(
+    keys: _RawKeys,
+    trigger_key: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+) -> "object | None":
     """Record while a key is held: terminal auto-repeat keeps the take alive,
     and a repeat gap longer than the release window ends it on POSIX. Native
     Windows polls the physical key state so its configurable repeat delay cannot
     truncate the start of an utterance."""
     keys.drain()
-    trigger_key = keys.read_key(None)
-    if trigger_key is None:
+    active_key = _wait_for_trigger(keys, trigger_key)
+    if active_key is None:
         return None
-    physical_state = keys.is_pressed(trigger_key)
+    physical_state = keys.is_pressed(active_key)
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     chunks = []
     last_key = time.monotonic()
     started = last_key
+    if on_recording is not None:
+        on_recording()
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
         while True:
             block, _overflowed = stream.read(blocksize)
             chunks.append(block.copy())
+            _report_level(block, on_level)
             if physical_state is None:
                 while keys.read_key(0) is not None:
                     last_key = time.monotonic()
             else:
-                physical_state = keys.is_pressed(trigger_key)
+                physical_state = keys.is_pressed(active_key)
             now = time.monotonic()
             if physical_state is False:
                 break
@@ -301,23 +321,32 @@ def _record_push_to_talk(keys: _RawKeys) -> "object | None":
     return _finish(chunks)
 
 
-def _record_push_toggle(keys: _RawKeys) -> "object | None":
+def _record_push_toggle(
+    keys: _RawKeys,
+    trigger_key: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+) -> "object | None":
     """Tap to start recording, tap again to send."""
     keys.drain()
-    if keys.read_key(None) is None:
+    if _wait_for_trigger(keys, trigger_key) is None:
         return None
     keys.drain()
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     chunks = []
     started = time.monotonic()
+    if on_recording is not None:
+        on_recording()
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
         while True:
             block, _overflowed = stream.read(blocksize)
             chunks.append(block.copy())
-            if keys.read_key(0) is not None:
+            _report_level(block, on_level)
+            key = keys.read_key(0)
+            if key is not None and (trigger_key is None or key == trigger_key):
                 break
             if time.monotonic() - started > _MAX_UTTERANCE_SECONDS:
                 break
@@ -325,7 +354,10 @@ def _record_push_toggle(keys: _RawKeys) -> "object | None":
     return _finish(chunks)
 
 
-def _record_always_on() -> "object | None":
+def _record_always_on(
+    on_level: Callable[[float], None] | None = None,
+    on_recording: Callable[[], None] | None = None,
+) -> "object | None":
     """Hands-free capture: calibrate the noise floor, trigger on speech
     energy, and end the utterance after a trailing pause."""
     sounddevice = _sounddevice()
@@ -348,6 +380,8 @@ def _record_always_on() -> "object | None":
         while True:
             block, _overflowed = stream.read(blocksize)
             level = _rms(block)
+            if chunks:
+                _report_level(block, on_level)
             if not chunks:
                 preroll.append(block.copy())
                 if len(preroll) > preroll_blocks:
@@ -355,6 +389,9 @@ def _record_always_on() -> "object | None":
                 if level >= threshold:
                     chunks = list(preroll)
                     silent_blocks = 0
+                    if on_recording is not None:
+                        on_recording()
+                    _report_level(block, on_level)
                 else:
                     noise_floor = 0.95 * noise_floor + 0.05 * level
                     threshold = max(noise_floor * 3.0, 0.01)
@@ -491,6 +528,9 @@ def run_listen(
     status: Callable[[str], None],
     remote: str | None = None,
     remote_cwd: str | None = None,
+    on_level: Callable[[float], None] | None = None,
+    on_phase: Callable[[str], None] | None = None,
+    trigger_key: str | None = None,
 ) -> None:
     """Drive the capture → transcribe → inject → reply loop until interrupted.
 
@@ -500,6 +540,8 @@ def run_listen(
     server). *remote_cwd* selects the project directory for remote ``claude``
     sessions.
     """
+    set_phase = on_phase or (lambda _phase: None)
+    set_phase("starting")
     transcriber = UtteranceTranscriber(device, model, on_status=status)
     if remote:
         status(f"remote: Claude Code runs on {remote} over SSH; voice stays local")
@@ -514,24 +556,39 @@ def run_listen(
     keys = _RawKeys() if mode in ("push-to-talk", "push-toggle") else None
 
     def capture():
+        set_phase("ready")
+        recording = lambda: set_phase("recording")
         if mode == "always-on":
-            return _record_always_on()
+            return _record_always_on(on_level=on_level, on_recording=recording)
         with keys:
             if mode == "push-to-talk":
-                return _record_push_to_talk(keys)
-            return _record_push_toggle(keys)
+                return _record_push_to_talk(
+                    keys,
+                    trigger_key=trigger_key,
+                    on_level=on_level,
+                    on_recording=recording,
+                )
+            return _record_push_toggle(
+                keys,
+                trigger_key=trigger_key,
+                on_level=on_level,
+                on_recording=recording,
+            )
 
     while True:
         audio = capture()
         if audio is None:
             continue
+        set_phase("transcribing")
         text = transcriber.transcribe(audio).strip()
         if not text:
             continue
         echo(f"you: {text}")
+        set_phase("thinking")
         if tmux_pane:
             _send_tmux(tmux_pane, text, remote=remote)
             status(f"sent to tmux pane {tmux_pane}; the live TUI owns the reply")
+            set_phase("ready")
         else:
             reply, session_id = _prompt_claude(
                 text, session_id, remote=remote, remote_cwd=remote_cwd
@@ -539,6 +596,8 @@ def run_listen(
             dialogue = speakable(reply)
             if dialogue:
                 echo(f"claude: {dialogue}")
+                set_phase("speaking")
                 speak(dialogue)
+            set_phase("ready")
         if once:
             return

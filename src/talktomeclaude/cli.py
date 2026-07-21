@@ -14,9 +14,12 @@ from talktomeclaude.tts import (
 )
 
 
-@click.group()
-def main() -> None:
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """Use voice as a medium for Claude Code."""
+    if ctx.invoked_subcommand is None:
+        _launch_dashboard()
 
 
 @main.command()
@@ -73,6 +76,38 @@ def _play_wav(path: Path) -> None:
         if channels > 1:
             samples = samples.reshape(-1, channels)
         sounddevice.play(samples, samplerate=wav.getframerate(), blocking=True)
+
+
+def _speak_reply(text: str) -> None:
+    from talktomeclaude import config
+
+    if not config.voice_assist_enabled():
+        return
+    import tempfile
+
+    wav_path = Path(tempfile.mkstemp(prefix="talktomeclaude-listen-", suffix=".wav")[1])
+    try:
+        synthesize(text, wav_path, None)
+        _play_wav(wav_path)
+    except (TTSError, click.ClickException):
+        pass
+    finally:
+        wav_path.unlink(missing_ok=True)
+
+
+def _launch_dashboard() -> None:
+    from talktomeclaude.tui import TUIError, run_dashboard
+
+    try:
+        run_dashboard(_speak_reply)
+    except TUIError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@main.command()
+def ui() -> None:
+    """Open the interactive voice dashboard."""
+    _launch_dashboard()
 
 
 @main.command()
@@ -273,20 +308,6 @@ def listen(
         remote_cwd if remote_cwd is not None else config.remote_cwd()
     ) if active_remote else None
 
-    def speak_reply(text: str) -> None:
-        if not config.voice_assist_enabled():
-            return
-        import tempfile
-
-        wav_path = Path(tempfile.mkstemp(prefix="talktomeclaude-listen-", suffix=".wav")[1])
-        try:
-            synthesize(text, wav_path, None)
-            _play_wav(wav_path)
-        except (TTSError, click.ClickException):
-            pass
-        finally:
-            wav_path.unlink(missing_ok=True)
-
     try:
         run_listen(
             mode=active_mode,
@@ -296,7 +317,7 @@ def listen(
             model=model_name,
             once=once,
             echo=click.echo,
-            speak=speak_reply,
+            speak=_speak_reply,
             status=lambda message: click.echo(message, err=True),
             remote=active_remote,
             remote_cwd=active_remote_cwd,
