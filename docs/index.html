@@ -130,7 +130,7 @@
   .tab:hover{background:var(--ink);color:var(--yellow);}
   .tab[aria-selected="true"]:hover{background:var(--yellow);color:var(--ink);}
   .term{background:var(--term-bg);color:var(--term-fg);font-family:var(--mono);font-size:.85rem;line-height:1.85;
-    border:2px solid var(--ink);padding:1.3rem 1.4rem;overflow-x:auto;}
+    border:2px solid var(--ink);padding:1.3rem 1.4rem;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
   .term .c{color:var(--term-dim);}
   .term .p{color:var(--yellow);}
   .term b{color:#fff;font-weight:400;}
@@ -138,6 +138,7 @@
   .cursor{display:inline-block;width:.6ch;height:1.05em;background:var(--yellow);vertical-align:-2px;animation:blink 1.1s steps(1) infinite;}
   @keyframes blink{50%{opacity:0;}}
   .panelhide{display:none;}
+  .remote-steps{display:grid;grid-template-columns:1fr;gap:1.1rem;}
   .caveat{border-left:5px solid var(--yellow);background:var(--paper-2);padding:.95rem 1.15rem;margin-top:1.1rem;font-size:.92rem;color:var(--ink-2);}
   .caveat b.k{color:var(--ochre);text-transform:uppercase;letter-spacing:.03em;font-size:.82rem;}
   .caveat code{font-family:var(--mono);}
@@ -182,6 +183,7 @@
       <a href="#does">What</a>
       <a href="#filter">The Filter</a>
       <a href="#install">Install</a>
+      <a href="#remote">Remote</a>
       <a href="#voices">Voices</a>
       <a href="#name">The Name</a>
     </nav>
@@ -286,8 +288,7 @@
       <button class="tab" role="tab" id="t-lin" aria-controls="p-lin" aria-selected="false">Linux / Unix</button>
     </div>
 
-    <div class="term" id="p-win" role="tabpanel" aria-labelledby="t-win">
-<span class="c"># Windows Terminal · PowerShell</span>
+    <div class="term" id="p-win" role="tabpanel" aria-labelledby="t-win"><span class="c"># Windows Terminal · PowerShell</span>
 <span class="c"># 1 · install uv (it fetches Python for you)</span>
 <span class="p">PS></span> <b>powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"</b>
 <span class="c"># 2 · grab the code (Code &#9656; Download ZIP, or git clone), then step in</span>
@@ -296,10 +297,8 @@
 <span class="p">PS></span> <b>uv venv --python 3.12; uv pip install -e .</b>
 <span class="c"># hear it</span>
 <span class="p">PS></span> <b>.\.venv\Scripts\talktomeclaude speak "Hello from Claude."</b>
-<span class="out">&#9656; playing… (voice: en_US-ljspeech-high)</span><span class="cursor"></span>
-    </div>
-    <div class="term panelhide" id="p-mac" role="tabpanel" aria-labelledby="t-mac">
-<span class="c"># macOS · Terminal.app</span>
+<span class="out">&#9656; playing… (voice: en_US-ljspeech-high)</span><span class="cursor"></span></div>
+    <div class="term panelhide" id="p-mac" role="tabpanel" aria-labelledby="t-mac"><span class="c"># macOS · Terminal.app</span>
 <span class="c"># 1 · install uv (fetches Python too)</span>
 <span class="p">$</span> <b>curl -LsSf https://astral.sh/uv/install.sh | sh</b>
 <span class="c"># 2 · clone (tiny — voices download on first speak) — first git run prompts for Command Line Tools</span>
@@ -308,10 +307,8 @@
 <span class="p">$</span> <b>uv venv --python 3.12 &amp;&amp; uv pip install -e .</b>
 <span class="c"># hear it</span>
 <span class="p">$</span> <b>./.venv/bin/talktomeclaude speak "Hello from Claude."</b>
-<span class="out">&#9656; playing… (no CUDA on a Mac &#8594; speech-to-text runs the CPU tier)</span><span class="cursor"></span>
-    </div>
-    <div class="term panelhide" id="p-lin" role="tabpanel" aria-labelledby="t-lin">
-<span class="c"># Linux / Unix</span>
+<span class="out">&#9656; playing… (no CUDA on a Mac &#8594; speech-to-text runs the CPU tier)</span><span class="cursor"></span></div>
+    <div class="term panelhide" id="p-lin" role="tabpanel" aria-labelledby="t-lin"><span class="c"># Linux / Unix</span>
 <span class="c"># 1 · system bits: PortAudio + git</span>
 <span class="p">$</span> <b>sudo apt install -y libportaudio2 git</b>   <span class="out"># dnf: portaudio · pacman: portaudio</span>
 <span class="c"># 2 · install uv, then clone (tiny — voices fetch on first use)</span>
@@ -320,15 +317,37 @@
 <span class="c"># 3 · build &amp; install  (NVIDIA? add: uv pip install -e ".[cuda]")</span>
 <span class="p">$</span> <b>uv venv --python 3.12 &amp;&amp; uv pip install -e .</b>
 <span class="p">$</span> <b>./.venv/bin/talktomeclaude speak "Hello from Claude."</b>
-<span class="out">&#9656; playing… (voice: en_US-ljspeech-high)</span><span class="cursor"></span>
-    </div>
+<span class="out">&#9656; playing… (voice: en_US-ljspeech-high)</span><span class="cursor"></span></div>
 
     <div class="caveat">
       <b class="k">Plug into Claude Code</b> &nbsp;·&nbsp; <code>claude --plugin-dir .</code> to test, or <code>/plugin install .</code> inside Claude Code to keep it. On <b>native Windows</b> the spoken-reply Stop hook is a bash script — install Git for Windows (<code>winget install --id Git.Git -e</code>) so Claude Code routes it through Git Bash. Everything else works either way. First transcription pulls a Whisper model once (~486&nbsp;MB CPU · ~3&nbsp;GB GPU), then caches forever.
     </div>
     <div class="caveat">
-      <b class="k">Coding on a server over SSH?</b> &nbsp;·&nbsp; Voice needs a mic and speakers, and a server reached over SSH has neither — so run it split: install talktomeclaude on the <b>laptop you sit at</b>, install Claude Code on the <b>server</b>, then <code>talktomeclaude config set remote you@server</code>. Your mic and the spoken reply stay local; Claude runs on the server; only text crosses SSH. One tool, any setup — Mac laptop, or laptop&#8594;Proxmox.
+      <b class="k">On a server over SSH? (Proxmox · homelab · VPS)</b> &nbsp;·&nbsp; Install here on the laptop you sit at, install Claude Code on the server — the voice stays local, Claude runs remote. Full setup just below &#8595;
     </div>
+  </div>
+</section>
+
+<section id="remote">
+  <div class="wrap">
+    <p class="eyebrow">Remote / SSH</p>
+    <h2>Voice here. Claude there.</h2>
+    <p class="section-intro">Sitting at a laptop but coding on a server — a Proxmox box, a homelab machine, a VPS you SSH into? That server has no microphone and no speakers, so the voice runs on your laptop, Claude runs on the server, and only text crosses the wire. Set it up once and just talk.</p>
+    <div class="remote-steps">
+      <div class="term"><span class="c"># ON THE SERVER — where Claude Code lives (your SSH session)</span>
+<span class="p">$</span> <b>claude --version</b>          <span class="out"># confirm Claude Code is installed</span>
+<span class="p">$</span> <b>claude</b>                    <span class="out"># run once to log in, then exit — that's all the server needs</span></div>
+      <div class="term"><span class="c"># ON YOUR COMPUTER — where the mic + speakers are (after you install talktomeclaude)</span>
+<span class="c"># 1 · passwordless SSH, so it never stops to ask for a password mid-sentence</span>
+<span class="p">$</span> <b>ssh-keygen -t ed25519</b>                        <span class="out"># press Enter through the prompts</span>
+<span class="p">$</span> <b>ssh-copy-id you@192.168.2.122</b>                <span class="out"># macOS/Linux (Windows one-liner: see README)</span>
+<span class="p">$</span> <b>ssh you@192.168.2.122 echo ok</b>                <span class="out"># must print ok, with NO password</span>
+<span class="c"># 2 · point talktomeclaude at the server — just once, it's remembered</span>
+<span class="p">$</span> <b>talktomeclaude config set remote you@192.168.2.122</b>
+<span class="c"># 3 · talk. mic + reply stay local; Claude runs on the server</span>
+<span class="p">$</span> <b>talktomeclaude listen</b><span class="cursor"></span></div>
+    </div>
+    <div class="caveat"><b class="k">Back to all-local</b> &nbsp;·&nbsp; <code>talktomeclaude config set remote local</code>. One tool, any setup — everything on a Mac laptop, or laptop&#8594;Proxmox. The full walkthrough (including the Windows key-copy one-liner and troubleshooting) is in the <a href="https://github.com/Fredasterehub/talktomeclaude#talking-to-claude-on-a-remote-server-ssh--proxmox" target="_blank" rel="noopener">README</a>.</div>
   </div>
 </section>
 
