@@ -1,0 +1,109 @@
+# llms.txt - talktomeclaude
+# Machine-readable instructions for AI assistants installing this tool for a user.
+# Format: YAML blocks for structured data, markdown for context.
+
+## METADATA
+```yaml
+name: talktomeclaude
+description: Local-first voice medium for Claude Code. You speak (local Whisper-class STT); Claude answers back in a real voice speaking ONLY its dialogue (never tool calls, code, or logs) via a Claude Code plugin Stop hook.
+repo: https://github.com/talktomeclaude/talktomeclaude
+license: MIT
+version: 0.1
+entrypoint: talktomeclaude   # console script installed into the venv
+```
+
+## REQUIREMENTS
+```yaml
+python: ">=3.11"
+clone_size: "~250 MB"          # three TTS voices are bundled IN the repo; no separate voice download
+first_run_download:            # Whisper STT model, downloaded ONCE on first transcribe/listen, then cached
+  cpu_tier: "~486 MB (small.en)"
+  gpu_tier: "~3 GB (large-v3, needs NVIDIA + CUDA)"
+  cache_dir: "~/.cache/talktomeclaude/stt-models"
+system_packages:
+  linux: [libportaudio2, git]   # dnf: portaudio · pacman: portaudio  (PortAudio powers mic/speaker via sounddevice)
+  macos: []                     # git via Xcode Command Line Tools (auto-prompt on first git use)
+  windows: []                   # see GOTCHAS for the Stop-hook / Git Bash note
+depends_on_optional:
+  claude_code: "required only for the voice loop + Stop-hook plugin; the CLI works standalone"
+```
+
+## INSTALL_WINDOWS
+```yaml
+# Windows Terminal (PowerShell)
+steps:
+  - cmd: 'powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'   # install uv (also fetches Python)
+  - note: "get the code — Code > Download ZIP and extract, OR: winget install --id Git.Git -e; git clone https://github.com/talktomeclaude/talktomeclaude.git"
+  - cmd: 'cd talktomeclaude'
+  - cmd: 'uv venv --python 3.12'
+  - cmd: 'uv pip install -e .'
+  - cmd: '.\.venv\Scripts\talktomeclaude speak "Hello from Claude."'   # verify
+```
+
+## INSTALL_MACOS
+```yaml
+# Terminal.app (Apple Silicon or Intel). No CUDA on macOS -> STT runs the CPU tier (expected).
+steps:
+  - cmd: 'curl -LsSf https://astral.sh/uv/install.sh | sh'   # install uv (also fetches Python)
+  - cmd: 'git clone https://github.com/talktomeclaude/talktomeclaude.git'   # first git run prompts to install Command Line Tools
+  - cmd: 'cd talktomeclaude'
+  - cmd: 'uv venv --python 3.12 && uv pip install -e .'
+  - cmd: './.venv/bin/talktomeclaude speak "Hello from Claude."'   # verify
+```
+
+## INSTALL_LINUX
+```yaml
+steps:
+  - cmd: 'sudo apt install -y libportaudio2 git'   # dnf: portaudio git · pacman: portaudio git
+  - cmd: 'curl -LsSf https://astral.sh/uv/install.sh | sh'   # install uv (also fetches Python)
+  - cmd: 'git clone https://github.com/talktomeclaude/talktomeclaude.git'
+  - cmd: 'cd talktomeclaude'
+  - cmd: 'uv venv --python 3.12 && uv pip install -e .'
+  - cmd: 'uv pip install -e ".[cuda]"'   # OPTIONAL: NVIDIA GPU tier for STT (large-v3)
+  - cmd: './.venv/bin/talktomeclaude speak "Hello from Claude."'   # verify
+```
+
+## PLUGIN_CLAUDE_CODE
+```yaml
+# Registers a Stop hook that speaks Claude's reply after each turn.
+test:      'claude --plugin-dir .'      # from the project directory, loads the plugin for the session
+permanent: '/plugin install .'          # run INSIDE Claude Code to keep it
+mute:      'talktomeclaude assist off'  # full mute (hook stays silent); 'assist on' to re-enable
+```
+
+## USAGE
+```yaml
+commands:
+  speak:      'talktomeclaude speak "text" [--out file.wav] [--voice NAME]'
+  listen:     'talktomeclaude listen [--mode always-on|push-to-talk|push-toggle] [--once]'
+  transcribe: 'talktomeclaude transcribe AUDIO [--device auto|cuda|cpu] [--show-tier]'
+  filter:     'talktomeclaude filter transcript.jsonl'   # prints only spoken dialogue (never code/tools)
+  voices:     'talktomeclaude voices'                    # list bundled voices + licenses
+  config:     'talktomeclaude config set|get recording-mode|voice-assist VALUE'
+  assist:     'talktomeclaude assist on|off|status'
+default_recording_mode: push-to-talk
+```
+
+## VOICES
+```yaml
+# All bundled, all public domain (trained from scratch; no copyrighted/celebrity voices). Piper runs as a subprocess (keeps project MIT).
+bundled:
+  - {name: en_US-ljspeech-high, accent: en_US, quality: high}
+  - {name: en_GB-cori-medium,   accent: en_GB, quality: medium}
+  - {name: en_US-bryce-medium,  accent: en_US, quality: medium}
+```
+
+## GOTCHAS
+```yaml
+windows_stop_hook:
+  problem: "The Stop hook is a bash .sh script; native Windows may not execute it (can open it in an editor)."
+  fix: "Install Git for Windows (winget install --id Git.Git -e) so Claude Code routes hooks through Git Bash. The CLI (speak/listen/transcribe/voices) works regardless; only the auto-speak hook needs Git Bash."
+macos_microphone:
+  problem: "First use of listen/recording: macOS asks Terminal for Microphone access; without it the mic returns silence."
+  fix: "Allow it (System Settings > Privacy & Security > Microphone > enable Terminal). speak needs no mic."
+linux_portaudio:
+  problem: "sounddevice needs system PortAudio on Linux (not bundled in the wheel)."
+  fix: "Install libportaudio2 (apt) / portaudio (dnf, pacman)."
+piper_platform_wheels:
+  note: "piper-tts ships wheels for Windows x64, macOS x64/arm64, Linux x64/aarch64. No Windows ARM64 or Alpine/musl wheel (those build from sdist)."
+```

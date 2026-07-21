@@ -1,0 +1,11 @@
+{
+  "name": "talktomeclaude",
+  "version": "0.1.0",
+  "description": "A local-first voice medium for Claude Code: speaks Claude's replies with bundled local TTS voices and hears you with local Whisper-class speech-to-text.",
+  "author": {
+    "name": "talktomeclaude contributors"
+  },
+  "homepage": "https://github.com/talktomeclaude/talktomeclaude",
+  "license": "MIT",
+  "keywords": ["voice", "tts", "stt", "speech", "accessibility"]
+}

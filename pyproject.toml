@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talktomeclaude"
+version = "0.1.0"
+description = "A local-first voice medium for Claude Code."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "click>=8.1",
+    "numpy>=1.24",
+    "piper-tts>=1.5.0",
+    "sounddevice>=0.5",
+    "faster-whisper>=1.2",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12>=9",
+]
+
+[project.scripts]
+talktomeclaude = "talktomeclaude.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

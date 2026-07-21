@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Generated-asset working files (raw pipeline output; curated assets/ are kept)
+assets/gen/
+
+# Local tooling / build scaffolding
+.kiln/
+.omx/
+.omc/
+.playwright-mcp/
+.claude/
+
+# Secrets & local env
+.env
+.env.local
+
+# Source material (not distributed)
+transcript.txt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+node_modules/
+
+# generated data-uri working files
+assets/*.datauri.txt
