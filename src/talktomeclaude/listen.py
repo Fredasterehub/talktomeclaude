@@ -219,8 +219,18 @@ class _RawKeys:
         import ctypes
 
         user32 = getattr(ctypes, "windll").user32
+        vk_key_scan = user32.VkKeyScanW
+        vk_key_scan.argtypes = [ctypes.c_wchar]
+        vk_key_scan.restype = ctypes.c_short
+        map_virtual_key = user32.MapVirtualKeyW
+        map_virtual_key.argtypes = [ctypes.c_uint, ctypes.c_uint]
+        map_virtual_key.restype = ctypes.c_uint
+        get_async_key_state = user32.GetAsyncKeyState
+        get_async_key_state.argtypes = [ctypes.c_int]
+        get_async_key_state.restype = ctypes.c_short
+
         if len(key) == 1:
-            mapped = user32.VkKeyScanW(ord(key))
+            mapped = vk_key_scan(key)
             if mapped in (-1, 0xFFFF):
                 return None
             virtual_key = mapped & 0xFF
@@ -231,12 +241,12 @@ class _RawKeys:
                 # MAPVK_VSC_TO_VK_EX expects the extended-key marker in the
                 # high byte (for example Up is E0 48, represented as 0xE048).
                 scan_code |= 0xE000
-            virtual_key = user32.MapVirtualKeyW(scan_code, 3)
+            virtual_key = map_virtual_key(scan_code, 3)
             if not virtual_key:
                 return None
         else:
             return None
-        return bool(user32.GetAsyncKeyState(virtual_key) & 0x8000)
+        return bool(get_async_key_state(virtual_key) & 0x8000)
 
 
 def _rms(block) -> float:

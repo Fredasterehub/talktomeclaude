@@ -89,8 +89,12 @@ class WindowsTerminalTests(unittest.TestCase):
             keys = listen._RawKeys()
             self.assertTrue(keys.is_pressed("k"))
 
-        user32.VkKeyScanW.assert_called_once_with(ord("k"))
+        user32.VkKeyScanW.assert_called_once_with("k")
         user32.GetAsyncKeyState.assert_called_once_with(ord("K"))
+        self.assertEqual(user32.VkKeyScanW.argtypes, [ctypes.c_wchar])
+        self.assertIs(user32.VkKeyScanW.restype, ctypes.c_short)
+        self.assertEqual(user32.GetAsyncKeyState.argtypes, [ctypes.c_int])
+        self.assertIs(user32.GetAsyncKeyState.restype, ctypes.c_short)
 
     def test_windows_extended_key_preserves_e0_scan_prefix(self) -> None:
         import ctypes
@@ -125,12 +129,15 @@ class WindowsTerminalTests(unittest.TestCase):
 
         with mock.patch.object(listen, "_sounddevice", return_value=sounddevice), mock.patch.object(
             listen, "_finish", return_value="audio"
+        ), mock.patch.object(
+            listen.time, "monotonic", side_effect=[0.0, 1.0, 2.0]
         ):
             result = listen._record_push_to_talk(keys)
 
         self.assertEqual(result, "audio")
         keys.read_key.assert_called_once_with(None)
         self.assertEqual(keys.is_pressed.call_count, 3)
+        self.assertEqual(stream.__enter__.return_value.read.call_count, 2)
 
     def test_always_on_does_not_open_raw_keys_on_windows(self) -> None:
         transcriber = mock.Mock()
