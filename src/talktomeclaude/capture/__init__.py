@@ -1,0 +1,48 @@
+"""Companion capture contracts and deterministic service."""
+
+from .contracts import (
+    CaptureCancelled,
+    CaptureCompletion,
+    CaptureContractError,
+    CaptureEnd,
+    CaptureMode,
+    CapturePhase,
+    CaptureProgress,
+    CaptureSettings,
+    CapturedAudio,
+    CaptureTurnResult,
+    ForegroundSnapshotRequest,
+    ForegroundSnapshotResolver,
+    SafetyNotice,
+    SafetyNoticeCode,
+    SnapshotCallableAdapter,
+    TranscriptAcceptance,
+    TranscriptClassifier,
+    TranscriptDisposition,
+    Transcription,
+)
+from .service import CaptureService, assess_transcript
+
+__all__ = [
+    "CaptureCancelled",
+    "CaptureCompletion",
+    "CaptureContractError",
+    "CaptureEnd",
+    "CaptureMode",
+    "CapturePhase",
+    "CaptureProgress",
+    "CaptureService",
+    "CaptureSettings",
+    "CaptureTurnResult",
+    "CapturedAudio",
+    "ForegroundSnapshotRequest",
+    "ForegroundSnapshotResolver",
+    "SafetyNotice",
+    "SafetyNoticeCode",
+    "SnapshotCallableAdapter",
+    "TranscriptAcceptance",
+    "TranscriptClassifier",
+    "TranscriptDisposition",
+    "Transcription",
+    "assess_transcript",
+]

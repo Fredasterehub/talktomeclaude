@@ -34,6 +34,10 @@ _TRANSITIONS: dict[tuple[RuntimePhase, EventKind], RuntimePhase] = {
         EventKind.DELIVERY_SUCCEEDED,
     ): RuntimePhase.WAITING_FOR_CLAUDE,
     (
+        RuntimePhase.DELIVERING,
+        EventKind.DICTATION_DELIVERED,
+    ): RuntimePhase.IDLE,
+    (
         RuntimePhase.WAITING_FOR_CLAUDE,
         EventKind.REPLY_RECEIVED,
     ): RuntimePhase.PLANNING,
@@ -55,6 +59,7 @@ _TRANSITIONS: dict[tuple[RuntimePhase, EventKind], RuntimePhase] = {
 
 _INTERRUPTIBLE_FOR_RECORDING = {
     RuntimePhase.IDLE,
+    RuntimePhase.AWAITING_CONFIRMATION,
     RuntimePhase.PLANNING,
     RuntimePhase.SPEAKING,
     RuntimePhase.PAUSED,

@@ -45,14 +45,13 @@ class CaptureCharacterizationTests(unittest.TestCase):
 
         with mock.patch.object(listen, "_sounddevice", return_value=sounddevice), mock.patch.object(
             listen, "_finish", return_value="audio"
-        ), mock.patch.object(
-            listen.time, "monotonic", side_effect=[0.0, 11.0, 45.0, 59.0]
-        ):
+        ), mock.patch.object(listen.time, "monotonic") as monotonic:
             result = listen._record_push_toggle(keys, trigger_key=" ")
 
         self.assertEqual(result, "audio")
         self.assertEqual(stream.__enter__.return_value.read.call_count, 3)
         self.assertEqual(keys.read_key.call_args_list[-1], mock.call(0))
+        monotonic.assert_not_called()
 
     def test_live_transcriber_preserves_exact_unicode_segments(self) -> None:
         model = mock.Mock()

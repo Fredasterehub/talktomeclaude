@@ -37,6 +37,7 @@ class EventKind(str, Enum):
     TRANSCRIPT_REVIEW_REQUIRED = "transcript_review_required"
     CONFIRM_TRANSCRIPT = "confirm_transcript"
     DELIVERY_SUCCEEDED = "delivery_succeeded"
+    DICTATION_DELIVERED = "dictation_delivered"
     REPLY_RECEIVED = "reply_received"
     PLAN_READY = "plan_ready"
     PAUSE_SPEECH = "pause_speech"

@@ -38,6 +38,7 @@ from enum import Enum
 from typing import Callable
 
 from talktomeclaude import command_catalog, config, conveyance, intent
+from talktomeclaude.capture.contracts import CaptureCancelled
 from talktomeclaude.stt import HOTWORDS, detect_tier, models_dir
 from talktomeclaude.transcript import speakable
 
@@ -478,7 +479,8 @@ def _speak_interruptible(
         finally:
             done.set()
 
-    stopping = lambda: stop_event is not None and stop_event.is_set()
+    def stopping() -> bool:
+        return stop_event is not None and stop_event.is_set()
     chunks: list = []
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
@@ -580,14 +582,20 @@ class UtteranceTranscriber:
         device: str = "auto",
         model: str | None = None,
         on_status: Callable[[str], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         status = on_status or (lambda message: None)
         self._requested_device = device
         self._model_override = model
         self._status = status
+        self._cancelled = cancelled or (lambda: False)
         tier = detect_tier(device, model)
         try:
+            self._check_cancelled()
             self._whisper = self._load(tier)
+            self._check_cancelled()
+        except CaptureCancelled:
+            raise
         except Exception as exc:
             if tier.device != "cuda" or device == "cuda":
                 raise ListenError(
@@ -599,7 +607,11 @@ class UtteranceTranscriber:
                 f"falling back to {fallback.describe()}"
             )
             try:
+                self._check_cancelled()
                 self._whisper = self._load(fallback)
+                self._check_cancelled()
+            except CaptureCancelled:
+                raise
             except Exception as fallback_exc:
                 raise ListenError(
                     f"could not load STT tier ({fallback.describe()}): {fallback_exc}"
@@ -621,7 +633,10 @@ class UtteranceTranscriber:
 
     def transcribe(self, audio) -> str:
         try:
+            self._check_cancelled()
             return self._transcribe_text(audio)
+        except CaptureCancelled:
+            raise
         except Exception as exc:
             if self.tier.device != "cuda" or self._requested_device == "cuda":
                 raise ListenError(
@@ -633,9 +648,13 @@ class UtteranceTranscriber:
                 f"falling back to {fallback.describe()}"
             )
             try:
+                self._check_cancelled()
                 self._whisper = self._load(fallback)
+                self._check_cancelled()
                 self.tier = fallback
                 return self._transcribe_text(audio)
+            except CaptureCancelled:
+                raise
             except Exception as fallback_exc:
                 raise ListenError(
                     f"transcription failed on {fallback.describe()}: {fallback_exc}"
@@ -643,18 +662,37 @@ class UtteranceTranscriber:
 
     def _transcribe_text(self, audio) -> str:
         segments = self._decode(audio)
-        return " ".join(
-            part for part in (segment.text.strip() for segment in segments) if part
-        )
+        parts: list[str] = []
+        iterator = iter(segments)
+        while True:
+            # faster-whisper returns a lazy generator.  Check both sides of
+            # ``next`` so cancellation requested during segment decoding is
+            # honored before any later segment is consumed.
+            self._check_cancelled()
+            try:
+                segment = next(iterator)
+            except StopIteration:
+                break
+            self._check_cancelled()
+            part = segment.text.strip()
+            if part:
+                parts.append(part)
+        return " ".join(parts)
 
     def _decode(self, audio):
+        self._check_cancelled()
         segments, _info = self._whisper.transcribe(
             audio,
             beam_size=5,
             hotwords=HOTWORDS,
             vad_filter=True,
         )
+        self._check_cancelled()
         return segments
+
+    def _check_cancelled(self) -> None:
+        if self._cancelled():
+            raise CaptureCancelled("transcription cancelled")
 
 
 def _sounddevice():
@@ -876,7 +914,6 @@ def _record_push_toggle(
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     chunks = []
-    started = time.monotonic()
     if on_recording is not None:
         on_recording()
     with sounddevice.InputStream(
@@ -888,8 +925,6 @@ def _record_push_toggle(
             _report_level(block, on_level)
             key = keys.read_key(0)
             if key is not None and (trigger_key is None or key == trigger_key):
-                break
-            if time.monotonic() - started > _MAX_UTTERANCE_SECONDS:
                 break
     keys.drain()
     return _finish(chunks)
@@ -913,7 +948,8 @@ def _record_always_on(
     switched on, this ungated pass returns None so the next capture re-gates
     through the wake detector instead of running an unbounded ungated window.
     """
-    stopping = lambda: stop_event is not None and stop_event.is_set()
+    def stopping() -> bool:
+        return stop_event is not None and stop_event.is_set()
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
     preroll_blocks = max(1, int(_PREROLL_SECONDS / _BLOCK_SECONDS))
@@ -1431,7 +1467,8 @@ def run_listen(
     def capture():
         nonlocal first_capture, keys
         set_phase("ready")
-        recording = lambda: set_phase("recording")
+        def recording() -> None:
+            set_phase("recording")
         if mode == "always-on":
             disposition = _wake_gate(speak, status, stop_event, wake_state)
             if disposition is WakeDisposition.STOP:

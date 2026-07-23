@@ -75,6 +75,23 @@ class StateReducerTests(unittest.TestCase):
         )
         self.assertEqual(RuntimePhase.DELIVERING, result.current.phase)
 
+    def test_generic_dictation_delivery_returns_directly_to_idle(self) -> None:
+        state = RuntimeState(RuntimePhase.DELIVERING, generation=3)
+
+        generic = reduce_state(
+            state,
+            RuntimeEvent(EventKind.DICTATION_DELIVERED, generation=3),
+        )
+        assistant = reduce_state(
+            state,
+            RuntimeEvent(EventKind.DELIVERY_SUCCEEDED, generation=3),
+        )
+
+        self.assertTrue(generic.accepted)
+        self.assertEqual(RuntimePhase.IDLE, generic.current.phase)
+        self.assertTrue(assistant.accepted)
+        self.assertEqual(RuntimePhase.WAITING_FOR_CLAUDE, assistant.current.phase)
+
     def test_every_state_event_pair_returns_an_explicit_result(self) -> None:
         for phase in RuntimePhase:
             state = _state(phase)
@@ -156,6 +173,7 @@ class StateReducerTests(unittest.TestCase):
 
     def test_starting_a_new_turn_interrupts_plan_or_speech_and_advances_generation(self) -> None:
         for phase in (
+            RuntimePhase.AWAITING_CONFIRMATION,
             RuntimePhase.PLANNING,
             RuntimePhase.SPEAKING,
             RuntimePhase.PAUSED,
