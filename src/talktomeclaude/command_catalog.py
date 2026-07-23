@@ -76,11 +76,29 @@ def parse_init_event(event: dict) -> list[dict]:
     return records
 
 
+def qualified_id(record: dict) -> str:
+    """The catalog identity contract: ``namespace:id``, bare id at top level."""
+    namespace = record.get("namespace") or ""
+    return f"{namespace}:{record['id']}" if namespace else str(record["id"])
+
+
 def merge_with_saved(init_records: list[dict], saved_flags: dict) -> list[dict]:
-    """Refresh session metadata while preserving each command's saved flags."""
+    """Refresh session metadata while preserving each command's saved flags.
+
+    Flags are keyed by qualified identity; a legacy bare-id key is honored
+    only while the bare id names exactly one command, and a qualified key
+    always wins over it.
+    """
+    counts: dict = {}
+    for record in init_records:
+        counts[record["id"]] = counts.get(record["id"], 0) + 1
     merged = []
     for record in init_records:
-        flags = saved_flags.get(record["id"], {})
+        flags = saved_flags.get(qualified_id(record))
+        if not isinstance(flags, dict) and counts[record["id"]] == 1:
+            flags = saved_flags.get(record["id"])
+        if not isinstance(flags, dict):
+            flags = {}
         merged.append(
             {
                 "id": record["id"],
@@ -113,7 +131,7 @@ def load_saved_flags() -> dict:
 def save_flags(records: list[dict]) -> None:
     """Persist the user-owned flags for every discovered command."""
     saved_flags = {
-        record["id"]: {
+        qualified_id(record): {
             "enabled": record["enabled"],
             "favorite": record["favorite"],
             "fire_count": record["fire_count"],

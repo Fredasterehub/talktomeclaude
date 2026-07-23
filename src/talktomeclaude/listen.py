@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
@@ -87,6 +88,7 @@ def barge_in_active(config_on: bool, headphones: bool) -> bool:
 WAKE_GREETING = "Yeah, I'm listening."
 INTENT_MODEL = "haiku"
 _INTENT_CONFIDENCE_FLOOR = 0.75
+_MAX_CLARIFICATIONS = 2
 _COMMAND_TRIGGERS = ("run command ", "fire command ", "command ")
 _FIRE_WORDS = frozenset({"go", "yes", "fire", "confirm", "do it"})
 _CANCEL_WORDS = frozenset({"cancel", "no", "stop", "never mind", "nevermind"})
@@ -94,49 +96,135 @@ _CANCEL_WORDS = frozenset({"cancel", "no", "stop", "never mind", "nevermind"})
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
-def _catalog_by_id(catalog: list[dict], command_id) -> dict | None:
-    for record in catalog:
-        if record.get("id") == command_id:
-            return record
-    return None
+@dataclass(frozen=True, slots=True)
+class IntentOutcome:
+    """The typed result of classifying one spoken command request."""
+
+    kind: str  # complete | missing_slot | ambiguous | no_match
+    record: dict | None = None
+    args: str = ""
+    missing_slots: tuple = ()
+    alternatives: tuple = ()
+
+
+_NO_MATCH = IntentOutcome("no_match")
+
+
+def _matching_records(catalog: list[dict], identity) -> list[dict]:
+    """Records named by *identity* — an exact qualified identity wins; a bare
+    id returns every carrier so a collision can surface as ambiguity."""
+    wanted = str(identity).strip().casefold()
+    if not wanted:
+        return []
+    qualified = [
+        record
+        for record in catalog
+        if command_catalog.qualified_id(record).casefold() == wanted
+    ]
+    if qualified:
+        return qualified
+    return [record for record in catalog if str(record.get("id", "")).casefold() == wanted]
 
 
 def _fire_text(record: dict, args: str) -> str:
-    namespace = record.get("namespace") or ""
-    name = f"{namespace}:{record['id']}" if namespace else str(record["id"])
-    return f"/{name} {args}".strip()
+    return f"/{command_catalog.qualified_id(record)} {args}".strip()
 
 
-def _intent_prompt(request: str, catalog: list[dict]) -> str:
+def _allowed_records(catalog: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split the enabled catalog into (resolvable, policy-blocked) records."""
+    enabled = [record for record in catalog if record.get("enabled", True)]
+    if _setting(config.command_namespace_policy, "allow-all") != "allowlist":
+        return enabled, []
+    allowlist = _setting(config.command_namespace_allowlist, ())
+    allowed = [r for r in enabled if (r.get("namespace") or "") in allowlist]
+    blocked = [r for r in enabled if (r.get("namespace") or "") not in allowlist]
+    return allowed, blocked
+
+
+def _command_request(utterance: str) -> str:
+    lowered = utterance.strip().casefold()
+    for trigger in _COMMAND_TRIGGERS:
+        if lowered.startswith(trigger):
+            return utterance.strip()[len(trigger):].strip()
+    return utterance.strip()
+
+
+def _match_name(utterance: str, records: list[dict]) -> "IntentOutcome | None":
+    """Deterministic name match: the leading word exactly names a command
+    (keyword prefilter, no model round-trip) and the remainder rides along as
+    candidate args; a bare-name collision surfaces as ambiguity."""
+    words = utterance.strip().split()
+    if not words or not records:
+        return None
+    head, remainder = words[0], " ".join(words[1:])
+    if intent.keyword_prefilter(head, records) is None:
+        return None
+    matches = _matching_records(records, head)
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return IntentOutcome("complete", record=matches[0], args=remainder)
+    choices = tuple(
+        command_catalog.qualified_id(match)
+        for match in matches[: intent.MAX_SPOKEN_ALTERNATIVES]
+    )
+    return IntentOutcome("ambiguous", args=remainder, alternatives=choices)
+
+
+def _pick_alternative(
+    utterance: str, alternatives: tuple, catalog: list[dict], args: str
+) -> "IntentOutcome | None":
+    """Resolve a disambiguation follow-up that exactly names one offered
+    alternative, carrying the candidate args unless the follow-up brings its own."""
+    candidates = []
+    for alternative in alternatives:
+        matches = _matching_records(catalog, alternative)
+        if len(matches) == 1 and matches[0] not in candidates:
+            candidates.append(matches[0])
+    hit = _match_name(utterance, candidates)
+    if hit is None or hit.kind != "complete":
+        return None
+    return IntentOutcome("complete", record=hit.record, args=hit.args or args)
+
+
+def _intent_prompt(request: str, catalog: list[dict], clarifications=()) -> str:
     lines = [
         "Classify this spoken request against the available commands. Answer "
         "with ONLY a JSON object shaped as "
         '{"command_id": string or null, "args": string, "missing_slots": [], '
-        '"confidence": number between 0 and 1, "alternatives": []}.',
+        '"confidence": number between 0 and 1, "alternatives": []}. '
+        "Use the qualified command name exactly as listed for command_id and "
+        "alternatives; name genuinely required argument slots in missing_slots.",
         f"Request: {request}",
-        "Commands:",
     ]
+    for label, answer in clarifications:
+        lines.append(f"Clarification ({label}): {answer}")
+    lines.append("Commands:")
     for record in catalog:
-        namespace = record.get("namespace") or "top-level"
         description = record.get("description") or "no description"
-        lines.append(f"- {record['id']} ({namespace}): {description}")
+        lines.append(f"- {command_catalog.qualified_id(record)}: {description}")
     return "\n".join(lines)
 
 
 def _classify_intent(
-    request: str, catalog: list[dict], status: Callable[[str], None]
-) -> "tuple[dict, str] | None":
+    request: str,
+    catalog: list[dict],
+    status: Callable[[str], None],
+    clarifications=(),
+) -> IntentOutcome:
     """Resolve *request* through the isolated intent sub-call — its own
     throwaway ``claude -p`` session, never resumed into the working history."""
-    command = intent.intent_subcall_command(_intent_prompt(request, catalog), INTENT_MODEL)
+    command = intent.intent_subcall_command(
+        _intent_prompt(request, catalog, clarifications), INTENT_MODEL
+    )
     try:
         result = _run_captured(command)
     except (OSError, subprocess.SubprocessError) as exc:
         status(f"intent classification unavailable ({exc}); treating the request as content")
-        return None
+        return _NO_MATCH
     if result.returncode != 0 or not result.stdout.strip():
         status("intent classification failed; treating the request as content")
-        return None
+        return _NO_MATCH
     try:
         envelope = json.loads(result.stdout)
         raw = envelope.get("result", "") if isinstance(envelope, dict) else ""
@@ -148,45 +236,82 @@ def _classify_intent(
         parsed = intent.parse_intent_response(raw)
     except (ValueError, KeyError, TypeError, IndexError):
         status("intent response unreadable; treating the request as content")
-        return None
+        return _NO_MATCH
     confidence = parsed.confidence if isinstance(parsed.confidence, (int, float)) else 0.0
-    record = _catalog_by_id(catalog, parsed.command_id) if parsed.command_id else None
-    if record is None or confidence < _INTENT_CONFIDENCE_FLOOR:
-        status("no confident command match; treating the request as content")
-        return None
     args = parsed.args if isinstance(parsed.args, str) else ""
-    return record, args
+    slots = intent.sanitize_missing_slots(parsed.missing_slots)
+    alternatives = intent.sanitize_alternatives(parsed.alternatives, catalog)
+    matches = _matching_records(catalog, parsed.command_id) if parsed.command_id else []
+    if len(matches) > 1:
+        choices = tuple(
+            command_catalog.qualified_id(match)
+            for match in matches[: intent.MAX_SPOKEN_ALTERNATIVES]
+        )
+        return IntentOutcome("ambiguous", args=args, alternatives=choices)
+    record = matches[0] if matches else None
+    if record is not None and confidence >= _INTENT_CONFIDENCE_FLOOR:
+        if slots:
+            return IntentOutcome(
+                "missing_slot", record=record, args=args, missing_slots=tuple(slots)
+            )
+        identity = command_catalog.qualified_id(record)
+        unresolved = [alt for alt in alternatives if alt != identity]
+        if unresolved:
+            choices = tuple(
+                [identity, *unresolved][: intent.MAX_SPOKEN_ALTERNATIVES]
+            )
+            return IntentOutcome("ambiguous", args=args, alternatives=choices)
+        return IntentOutcome("complete", record=record, args=args)
+    if alternatives:
+        return IntentOutcome("ambiguous", args=args, alternatives=tuple(alternatives))
+    status("no confident command match; treating the request as content")
+    return _NO_MATCH
 
 
 def _resolve_command(
     utterance: str, catalog: list[dict], status: Callable[[str], None]
-) -> "tuple[dict, str] | None":
-    """Resolve a spoken utterance to a fireable command.
+) -> IntentOutcome:
+    """Resolve a spoken utterance to a typed command outcome.
 
     The deterministic keyword prefilter runs first (exact command names,
     no model round-trip). Only an explicit command request ("command …",
     "run command …", "fire command …") escalates to the isolated intent
-    sub-call; ordinary content never does.
+    sub-call; ordinary content never does. Namespace policy is honored here:
+    a policy-blocked match is reported and treated as content.
     """
-    enabled = [record for record in catalog if record.get("enabled", True)]
-    if not enabled:
-        return None
-    command_id = intent.keyword_prefilter(utterance, enabled)
-    if command_id is not None:
-        record = _catalog_by_id(enabled, command_id)
-        return (record, "") if record is not None else None
-    lowered = utterance.strip().casefold()
-    for trigger in _COMMAND_TRIGGERS:
-        if lowered.startswith(trigger):
-            request = utterance.strip()[len(trigger):].strip()
-            if not request:
-                return None
-            command_id = intent.keyword_prefilter(request, enabled)
-            if command_id is not None:
-                record = _catalog_by_id(enabled, command_id)
-                return (record, "") if record is not None else None
-            return _classify_intent(request, enabled, status)
-    return None
+    allowed, blocked = _allowed_records(catalog)
+    if not allowed and not blocked:
+        return _NO_MATCH
+    request = _command_request(utterance)
+    triggered = request != utterance.strip()
+    outcome = _match_name(utterance, allowed)
+    if outcome is None and triggered and request:
+        outcome = _match_name(request, allowed)
+        if outcome is None:
+            outcome = _classify_intent(request, allowed, status)
+    if outcome is not None and outcome.kind != "no_match":
+        return outcome
+    if blocked:
+        hit = _match_name(utterance, blocked) or (
+            _match_name(request, blocked) if triggered and request else None
+        )
+        if hit is not None:
+            record = hit.record or {}
+            namespace = record.get("namespace") or (
+                hit.alternatives[0].split(":")[0] if hit.alternatives else "top-level"
+            )
+            status(
+                f"the {namespace} namespace is not allowed by the "
+                "command-namespace allowlist; treating the request as content"
+            )
+    return _NO_MATCH
+
+
+def _spoken_choices(alternatives) -> str:
+    listed = list(alternatives)
+    if len(listed) == 1:
+        return listed[0]
+    return ", ".join(listed[:-1]) + f", or {listed[-1]}"
 
 
 # ── wake word, barge-in, and gradual conveyance ──────────────────────────────
@@ -1196,11 +1321,16 @@ def run_listen(
 
     catalog: list[dict] = []
     pending_fire: "tuple[dict, str] | None" = None
+    pending_namespace: "tuple[dict, str] | None" = None
+    clarify: dict | None = None
+    approved_namespaces: set = set()
     pending_text: str | None = None
 
     def handle_event(event: dict) -> None:
         # The session's system/init event advertises the voice-fireable
         # commands; refresh the catalog while preserving the user-owned flags.
+        # Installed unconditionally so a plain CLI session populates the
+        # catalog too; an external callback chains behind it.
         if (
             isinstance(event, dict)
             and event.get("type") == "system"
@@ -1214,7 +1344,7 @@ def run_listen(
         if on_event is not None:
             on_event(event)
 
-    stream_events = handle_event if on_event is not None else None
+    stream_events = handle_event
 
     def capture():
         nonlocal first_capture, keys
@@ -1347,6 +1477,63 @@ def run_listen(
         )
         return None
 
+    def say(line: str) -> None:
+        status(line)
+        set_phase("speaking")
+        speak(line)
+        set_phase("ready")
+
+    def fire(record: dict, args: str) -> str:
+        fired = _fire_text(record, args)
+        record["fire_count"] = int(record.get("fire_count", 0)) + 1
+        try:
+            command_catalog.save_flags(catalog)
+        except OSError:
+            pass
+        echo(f"you: {fired}")
+        status(f"firing {fired} into the session")
+        return fired
+
+    def advance(outcome, original, request, history, rounds):
+        """Route a typed outcome: queue the confirmation, ask one bounded
+        clarification, or return the text to send as ordinary content."""
+        nonlocal pending_fire, clarify
+        if outcome.kind == "complete":
+            pending_fire = (outcome.record, outcome.args)
+            say(f"Firing {_fire_text(outcome.record, outcome.args)}. Say go, or cancel.")
+            return None
+        if outcome.kind == "missing_slot" and rounds < _MAX_CLARIFICATIONS:
+            slot = outcome.missing_slots[0]
+            clarify = {
+                "original": original,
+                "request": request,
+                "args": outcome.args,
+                "kind": "missing_slot",
+                "label": f"asked for {slot}",
+                "alternatives": (),
+                "history": history,
+                "rounds": rounds,
+            }
+            say(f"I need the {slot} for {_fire_text(outcome.record, '')}. Say it, or cancel.")
+            return None
+        if outcome.kind == "ambiguous" and rounds < _MAX_CLARIFICATIONS and outcome.alternatives:
+            choices = tuple(outcome.alternatives[: intent.MAX_SPOKEN_ALTERNATIVES])
+            clarify = {
+                "original": original,
+                "request": request,
+                "args": outcome.args,
+                "kind": "ambiguous",
+                "label": f"asked to choose between {', '.join(choices)}",
+                "alternatives": choices,
+                "history": history,
+                "rounds": rounds,
+            }
+            say(f"Which command: {_spoken_choices(choices)}? Say the name, or cancel.")
+            return None
+        if rounds:
+            status("clarification exhausted; sending the original request as content")
+        return original
+
     while True:
         if stop_event is not None and stop_event.is_set():
             return
@@ -1370,41 +1557,86 @@ def run_listen(
             if once:
                 return
             continue
-        # Voice-activated commands: resolve, confirm, then fire the confirmed
-        # command through the same resumed session with the operator posture.
+        # Voice-activated commands: resolve to a typed outcome, clarify within
+        # the bounded budget, confirm, then fire the confirmed command through
+        # the same resumed session with the operator posture.
         normalized = " ".join(text.casefold().split())
-        if pending_fire is not None:
-            record, args = pending_fire
-            pending_fire = None
+        if pending_namespace is not None:
+            record, args = pending_namespace
+            pending_namespace = None
             if normalized in _CANCEL_WORDS:
-                status(f"cancelled /{record['id']}")
+                status(f"cancelled /{command_catalog.qualified_id(record)}")
                 set_phase("ready")
                 if once:
                     return
                 continue
             if normalized in _FIRE_WORDS:
-                text = _fire_text(record, args)
-                record["fire_count"] = int(record.get("fire_count", 0)) + 1
-                try:
-                    command_catalog.save_flags(catalog)
-                except OSError:
-                    pass
-                echo(f"you: {text}")
-                status(f"firing {text} into the session")
+                approved_namespaces.add(record.get("namespace") or "")
+                text = fire(record, args)
             # Anything else is ordinary content — fall through unchanged.
-        else:
-            resolved = _resolve_command(text, catalog, status)
-            if resolved is not None:
-                pending_fire = resolved
-                record, args = resolved
-                confirmation = f"Firing {_fire_text(record, args)}. Say go, or cancel."
-                status(confirmation)
-                set_phase("speaking")
-                speak(confirmation)
+        elif pending_fire is not None:
+            record, args = pending_fire
+            pending_fire = None
+            if normalized in _CANCEL_WORDS:
+                status(f"cancelled /{command_catalog.qualified_id(record)}")
                 set_phase("ready")
                 if once:
                     return
                 continue
+            if normalized in _FIRE_WORDS:
+                namespace = record.get("namespace") or ""
+                if (
+                    _setting(config.command_namespace_policy, "allow-all")
+                    == "ask-first-use"
+                    and namespace not in approved_namespaces
+                ):
+                    # The first fire of each namespace this session needs an
+                    # explicit extra spoken yes; the grant is session-scoped.
+                    pending_namespace = (record, args)
+                    say(
+                        f"First {namespace or 'top-level'} command this session. "
+                        "Say yes to allow."
+                    )
+                    continue
+                text = fire(record, args)
+            # Anything else is ordinary content — fall through unchanged.
+        elif clarify is not None:
+            round_state, clarify = clarify, None
+            if normalized in _CANCEL_WORDS:
+                status("cancelled the command request")
+                set_phase("ready")
+                if once:
+                    return
+                continue
+            history = round_state["history"] + [(round_state["label"], text)]
+            rounds = round_state["rounds"] + 1
+            allowed, _blocked = _allowed_records(catalog)
+            outcome = None
+            if round_state["kind"] == "ambiguous":
+                outcome = _pick_alternative(
+                    text, round_state["alternatives"], allowed, round_state["args"]
+                )
+            if outcome is None:
+                outcome = _classify_intent(
+                    round_state["request"], allowed, status, history
+                )
+            handled = advance(
+                outcome, round_state["original"], round_state["request"], history, rounds
+            )
+            if handled is None:
+                if once and pending_fire is not None:
+                    return
+                continue
+            text = handled  # exhausted: the ORIGINAL utterance flows as content
+        else:
+            outcome = _resolve_command(text, catalog, status)
+            if outcome.kind != "no_match":
+                handled = advance(outcome, text, _command_request(text), [], 0)
+                if handled is None:
+                    if once and pending_fire is not None:
+                        return
+                    continue
+                text = handled
         set_phase("thinking")
         reply, session_id = _prompt_claude(
             text,

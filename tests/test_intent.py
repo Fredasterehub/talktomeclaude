@@ -1,6 +1,7 @@
 """Tests for the voice-command intent router: a deterministic keyword
 prefilter ahead of any model round-trip, the isolated intent sub-call command
-builder, and the constrained intent-JSON parser."""
+builder, the constrained intent-JSON parser, and the sanitizers that reduce
+the parser's untrusted output to safe, catalog-validated values."""
 
 from __future__ import annotations
 
@@ -79,6 +80,61 @@ class ParseIntentResponseTests(unittest.TestCase):
         self.assertIsNone(result.command_id)
         self.assertEqual(result.missing_slots, ["message"])
         self.assertEqual(result.alternatives, ["commit", "commit-amend"])
+
+
+QUALIFIED_CATALOG = [
+    {"id": "kiln-fire", "namespace": "kiln"},
+    {"id": "commit", "namespace": "git"},
+    {"id": "deploy", "namespace": "web"},
+    {"id": "deploy", "namespace": "api"},
+    {"id": "mytool", "namespace": ""},
+]
+
+
+class SanitizeMissingSlotsTests(unittest.TestCase):
+    def test_non_list_input_yields_no_slots(self) -> None:
+        self.assertEqual(intent.sanitize_missing_slots("message"), [])
+        self.assertEqual(intent.sanitize_missing_slots(None), [])
+
+    def test_keeps_only_unique_nonempty_strings(self) -> None:
+        raw = [None, "", "   ", 3, "message", "message ", "scope"]
+        self.assertEqual(intent.sanitize_missing_slots(raw), ["message", "scope"])
+
+
+class SanitizeAlternativesTests(unittest.TestCase):
+    def test_non_list_input_yields_no_alternatives(self) -> None:
+        self.assertEqual(intent.sanitize_alternatives("commit", QUALIFIED_CATALOG), [])
+
+    def test_bare_name_canonicalizes_to_qualified_identity(self) -> None:
+        self.assertEqual(
+            intent.sanitize_alternatives(["commit"], QUALIFIED_CATALOG), ["git:commit"]
+        )
+
+    def test_top_level_command_keeps_its_bare_identity(self) -> None:
+        self.assertEqual(
+            intent.sanitize_alternatives(["mytool"], QUALIFIED_CATALOG), ["mytool"]
+        )
+
+    def test_ambiguous_bare_name_is_dropped(self) -> None:
+        self.assertEqual(intent.sanitize_alternatives(["deploy"], QUALIFIED_CATALOG), [])
+
+    def test_unknown_and_non_string_entries_are_dropped(self) -> None:
+        self.assertEqual(
+            intent.sanitize_alternatives(["bogus", 7, None], QUALIFIED_CATALOG), []
+        )
+
+    def test_dedupes_bare_and_qualified_forms(self) -> None:
+        self.assertEqual(
+            intent.sanitize_alternatives(["commit", "git:commit"], QUALIFIED_CATALOG),
+            ["git:commit"],
+        )
+
+    def test_caps_spoken_alternatives_at_three(self) -> None:
+        raw = ["kiln:kiln-fire", "git:commit", "web:deploy", "api:deploy", "mytool"]
+        self.assertEqual(
+            intent.sanitize_alternatives(raw, QUALIFIED_CATALOG),
+            ["kiln:kiln-fire", "git:commit", "web:deploy"],
+        )
 
 
 if __name__ == "__main__":

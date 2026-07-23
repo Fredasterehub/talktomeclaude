@@ -1,12 +1,16 @@
-"""The production voice loop wiring: catalog-driven command firing, wake-word
-gating, the conveyance checkpoint loop, and barge-in playback selection."""
+"""The production voice loop wiring: catalog-driven command firing with typed
+intent outcomes, bounded clarification, namespace policy, wake-word gating,
+the conveyance checkpoint loop, and barge-in playback selection."""
 
 from __future__ import annotations
 
 import importlib
+import json
 import os
+import subprocess
 import tempfile
 import threading
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -106,6 +110,236 @@ class VoiceCommandDispatchTests(_Isolated):
         ):
             self._run(["what is the capital of france"], prompts, spoken)
         self.assertEqual(prompts, ["what is the capital of france"])
+
+
+_INIT_EVENT = {
+    "type": "system",
+    "subtype": "init",
+    "slash_commands": ["kiln-fire", "model", "help"],
+    "skills": [
+        {"name": "commit", "namespace": "git", "description": "Commit staged work", "read_only": False},
+        {"name": "deploy", "namespace": "web", "description": "Ship the web app", "read_only": False},
+        {"name": "deploy", "namespace": "api", "description": "Ship the api", "read_only": False},
+    ],
+}
+
+
+class _LoopHarness(_Isolated):
+    """Drive run_listen offline: scripted utterances, a faked working session
+    that seeds the catalog from the init event, and scripted intent sub-call
+    payloads consumed through the real classify/sanitize pipeline."""
+
+    def run_loop(self, utterances, intents=(), once=False, external_on_event=None):
+        out = types.SimpleNamespace(
+            prompts=[], spoken=[], statuses=[], sub_prompts=[], sub_commands=[],
+            handlers=[],
+        )
+        stop_event = threading.Event()
+        takes = iter(utterances)
+
+        def next_take():
+            try:
+                return next(takes)
+            except StopIteration:
+                stop_event.set()
+                return None
+
+        def fake_prompt(text, session_id, **kwargs):
+            out.prompts.append(text)
+            handler = kwargs.get("on_event")
+            out.handlers.append(handler)
+            if handler is not None:
+                handler(_INIT_EVENT)
+            return ("ok", "sess-1")
+
+        responses = iter(intents)
+
+        def fake_captured(command, on_wait=None):
+            out.sub_commands.append(command)
+            out.sub_prompts.append(command[2])
+            payload = next(responses)
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps({"result": json.dumps(payload)}), ""
+            )
+
+        transcriber = mock.Mock()
+        transcriber.transcribe.side_effect = lambda audio: audio or ""
+
+        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+            listen, "_record_always_on", side_effect=lambda **kwargs: next_take()
+        ), mock.patch.object(
+            listen, "UtteranceTranscriber", return_value=transcriber
+        ), mock.patch.object(listen, "_prompt_claude", fake_prompt), mock.patch.object(
+            listen, "_run_captured", fake_captured
+        ):
+            listen.run_listen(
+                mode="always-on",
+                session_id=None,
+                tmux_pane=None,
+                device="cpu",
+                model=None,
+                once=once,
+                echo=lambda _line: None,
+                speak=out.spoken.append,
+                status=out.statuses.append,
+                stop_event=stop_event,
+                on_event=external_on_event,
+            )
+        out.leftover = list(takes)
+        return out
+
+
+class TypedOutcomeDispatchTests(_LoopHarness):
+    def test_missing_slot_prompts_once_then_completes(self) -> None:
+        out = self.run_loop(
+            ["hello", "run command save my work to git", "fix the login bug", "go"],
+            intents=[
+                {"command_id": "git:commit", "args": "", "missing_slots": ["message"],
+                 "confidence": 0.9, "alternatives": []},
+                {"command_id": "git:commit", "args": '-m "fix the login bug"',
+                 "missing_slots": [], "confidence": 0.95, "alternatives": []},
+            ],
+        )
+        self.assertTrue(any("I need the message for /git:commit" in line for line in out.spoken))
+        self.assertTrue(any('Firing /git:commit -m "fix the login bug"' in line for line in out.spoken))
+        self.assertEqual(out.prompts, ["hello", '/git:commit -m "fix the login bug"'])
+        self.assertEqual(len(out.sub_prompts), 2)
+        self.assertIn("Request: save my work to git", out.sub_prompts[1])
+        self.assertIn("Clarification (asked for message): fix the login bug", out.sub_prompts[1])
+        for command in out.sub_commands:
+            self.assertNotIn("--resume", command)
+
+    def test_ambiguity_is_spoken_capped_at_three_then_disambiguated(self) -> None:
+        out = self.run_loop(
+            ["hello", "run command ship it to production", "api:deploy", "go"],
+            intents=[
+                {"command_id": None, "args": "", "missing_slots": [], "confidence": 0.3,
+                 "alternatives": ["web:deploy", "api:deploy", "commit", "kiln-fire"]},
+            ],
+        )
+        choice = next(line for line in out.spoken if line.startswith("Which command"))
+        self.assertIn("web:deploy, api:deploy, or git:commit", choice)
+        self.assertNotIn("kiln-fire", choice)
+        self.assertEqual(out.prompts, ["hello", "/api:deploy"])
+        self.assertEqual(len(out.sub_prompts), 1)  # the pick was deterministic
+
+    def test_confident_match_with_unresolved_alternatives_stays_ambiguous(self) -> None:
+        out = self.run_loop(
+            ["hello", "run command ship the changes", "git:commit", "go"],
+            intents=[
+                {"command_id": "git:commit", "args": "", "missing_slots": [],
+                 "confidence": 0.9, "alternatives": ["web:deploy"]},
+            ],
+        )
+        choice = next(line for line in out.spoken if line.startswith("Which command"))
+        self.assertIn("git:commit, or web:deploy", choice)
+        self.assertEqual(out.prompts, ["hello", "/git:commit"])
+
+    def test_low_confidence_without_alternatives_falls_back_to_content(self) -> None:
+        out = self.run_loop(
+            ["hello", "run command make it nice"],
+            intents=[
+                {"command_id": "git:commit", "args": "", "missing_slots": [],
+                 "confidence": 0.2, "alternatives": []},
+            ],
+        )
+        self.assertEqual(out.prompts, ["hello", "run command make it nice"])
+        self.assertTrue(any("no confident command match" in line for line in out.statuses))
+
+    def test_cancel_mid_clarification_aborts_cleanly(self) -> None:
+        out = self.run_loop(
+            ["hello", "run command save my work to git", "never mind"],
+            intents=[
+                {"command_id": "git:commit", "args": "", "missing_slots": ["message"],
+                 "confidence": 0.9, "alternatives": []},
+            ],
+        )
+        self.assertEqual(out.prompts, ["hello"])
+        self.assertTrue(any("cancelled the command request" in line for line in out.statuses))
+        saved = command_catalog.load_saved_flags()
+        self.assertEqual(saved["git:commit"]["fire_count"], 0)
+
+    def test_exhaustion_routes_the_original_utterance_as_content(self) -> None:
+        slot = {"command_id": "git:commit", "args": "", "missing_slots": ["message"],
+                "confidence": 0.9, "alternatives": []}
+        out = self.run_loop(
+            ["hello", "run command save my work", "alpha", "beta"],
+            intents=[slot, dict(slot, missing_slots=["scope"]), dict(slot, missing_slots=["scope"])],
+        )
+        self.assertEqual(out.prompts, ["hello", "run command save my work"])
+        self.assertNotIn("alpha", out.prompts)
+        self.assertNotIn("beta", out.prompts)
+        self.assertEqual(len(out.sub_prompts), 3)  # initial + two clarification rounds
+        self.assertTrue(any("clarification exhausted" in line for line in out.statuses))
+
+    def test_exact_command_carries_trailing_args_to_the_fire(self) -> None:
+        out = self.run_loop(["hello", "kiln-fire --dry-run", "go"])
+        self.assertTrue(any("Firing /kiln-fire --dry-run" in line for line in out.spoken))
+        self.assertEqual(out.prompts, ["hello", "/kiln-fire --dry-run"])
+
+    def test_exact_command_with_remainder_never_fires_empty_args(self) -> None:
+        out = self.run_loop(["hello", "kiln-fire --dry-run", "go"])
+        self.assertNotIn("/kiln-fire", out.prompts)
+        self.assertFalse(any(line.startswith("Firing /kiln-fire.") for line in out.spoken))
+
+    def test_namespace_collision_resolves_by_qualified_identity(self) -> None:
+        out = self.run_loop(["hello", "deploy now", "web:deploy", "go"])
+        choice = next(line for line in out.spoken if line.startswith("Which command"))
+        self.assertIn("web:deploy, or api:deploy", choice)
+        self.assertTrue(any("Firing /web:deploy now" in line for line in out.spoken))
+        self.assertEqual(out.prompts, ["hello", "/web:deploy now"])
+        self.assertEqual(out.sub_prompts, [])
+        saved = command_catalog.load_saved_flags()
+        self.assertEqual(saved["web:deploy"]["fire_count"], 1)
+        self.assertEqual(saved["api:deploy"]["fire_count"], 0)
+
+    def test_internal_handler_installed_without_external_callback(self) -> None:
+        out = self.run_loop(["hello", "kiln-fire", "go"], external_on_event=None)
+        self.assertIsNotNone(out.handlers[0])
+        self.assertEqual(out.prompts, ["hello", "/kiln-fire"])
+
+    def test_internal_handler_chains_the_external_callback(self) -> None:
+        events: list[dict] = []
+        out = self.run_loop(["hello"], external_on_event=events.append)
+        self.assertEqual(out.prompts, ["hello"])
+        self.assertIn(_INIT_EVENT, events)
+
+
+class NamespacePolicyTests(_LoopHarness):
+    def test_allowlist_blocks_other_namespaces_and_says_so(self) -> None:
+        config.set_command_namespace_policy("allowlist")
+        config.set_command_namespace_allowlist("git")
+        out = self.run_loop(["hello", "kiln-fire", "commit -m done", "go"])
+        self.assertEqual(out.prompts, ["hello", "kiln-fire", "/git:commit -m done"])
+        self.assertTrue(any("is not allowed" in line for line in out.statuses))
+        self.assertFalse(any("Firing /kiln-fire" in line for line in out.spoken))
+
+    def test_ask_first_use_gates_each_namespace_once_per_session(self) -> None:
+        config.set_command_namespace_policy("ask-first-use")
+        out = self.run_loop(["hello", "kiln-fire", "go", "yes", "kiln-fire", "go"])
+        asks = [line for line in out.spoken if "Say yes to allow" in line]
+        self.assertEqual(len(asks), 1)
+        self.assertEqual(out.prompts, ["hello", "/kiln-fire", "/kiln-fire"])
+        saved = command_catalog.load_saved_flags()
+        self.assertEqual(saved["kiln-fire"]["fire_count"], 2)
+
+    def test_ask_first_use_cancel_drops_the_fire(self) -> None:
+        config.set_command_namespace_policy("ask-first-use")
+        out = self.run_loop(["hello", "kiln-fire", "go", "cancel"])
+        self.assertEqual(out.prompts, ["hello"])
+        saved = command_catalog.load_saved_flags()
+        self.assertEqual(saved["kiln-fire"]["fire_count"], 0)
+
+
+class OnceClarificationTests(_LoopHarness):
+    def test_once_session_survives_one_clarification_round_then_ends(self) -> None:
+        records = command_catalog.parse_init_event(_INIT_EVENT)
+        with mock.patch.object(listen, "_allowed_records", return_value=(records, [])):
+            out = self.run_loop(["deploy now", "web:deploy", "SENTINEL"], once=True)
+        self.assertTrue(any(line.startswith("Which command") for line in out.spoken))
+        self.assertTrue(any("Firing /web:deploy now" in line for line in out.spoken))
+        self.assertEqual(out.prompts, [])
+        self.assertEqual(out.leftover, ["SENTINEL"])
 
 
 class WakeGateTests(_Isolated):

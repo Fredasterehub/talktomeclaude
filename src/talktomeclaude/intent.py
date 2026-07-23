@@ -8,6 +8,9 @@ import shutil
 from typing import Any
 
 
+MAX_SPOKEN_ALTERNATIVES = 3
+
+
 @dataclass(frozen=True, slots=True)
 class IntentResponse:
     """The locked response contract returned by intent classification."""
@@ -17,6 +20,47 @@ class IntentResponse:
     missing_slots: Any
     confidence: Any
     alternatives: Any
+
+
+def sanitize_missing_slots(raw) -> list[str]:
+    """Normalize untrusted missing_slots to unique nonempty strings."""
+    if not isinstance(raw, list):
+        return []
+    slots: list[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            slot = item.strip()
+            if slot and slot not in slots:
+                slots.append(slot)
+    return slots
+
+
+def sanitize_alternatives(raw, catalog: list[dict]) -> list[str]:
+    """Reduce untrusted alternatives to canonical qualified command
+    identities (``namespace:id``, bare id at top level), deduped and capped
+    for speech; bare names resolve only when they identify one command."""
+    if not isinstance(raw, list):
+        return []
+    counts: dict[str, int] = {}
+    for entry in catalog:
+        counts[entry["id"]] = counts.get(entry["id"], 0) + 1
+    canonical: dict[str, str] = {}
+    for entry in catalog:
+        namespace = entry["namespace"]
+        qualified = f"{namespace}:{entry['id']}" if namespace else str(entry["id"])
+        canonical[qualified.casefold()] = qualified
+        if counts[entry["id"]] == 1:
+            canonical.setdefault(str(entry["id"]).casefold(), qualified)
+    alternatives: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        identity = canonical.get(item.strip().casefold())
+        if identity is not None and identity not in alternatives:
+            alternatives.append(identity)
+            if len(alternatives) == MAX_SPOKEN_ALTERNATIVES:
+                break
+    return alternatives
 
 
 def keyword_prefilter(utterance: str, catalog: list[dict]) -> str | None:
