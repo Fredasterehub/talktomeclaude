@@ -2,8 +2,8 @@
 
 A Claude Code transcript is a JSONL file of typed entries. Only assistant
 prose is ever spoken: tool calls, tool results, thinking blocks, sidechain
-(subagent) traffic, and fenced code are silently dropped, and remaining
-markdown is flattened into speakable text.
+(subagent) traffic, and code — fenced blocks and inline spans alike — are
+silently dropped, and remaining markdown is flattened into speakable text.
 """
 
 import json
@@ -53,10 +53,11 @@ def speakable(text: str) -> str:
         line = _BULLET_RE.sub("", line)
         line = _IMAGE_RE.sub(r"\1", line)
         line = _LINK_RE.sub(r"\1", line)
-        line = _INLINE_CODE_RE.sub(r"\1", line)
+        line = _INLINE_CODE_RE.sub("", line)  # code is never spoken, even inline
         line = _BOLD_RE.sub(r"\2", line)
         line = _ITALIC_RE.sub(r"\1", line)
         line = line.replace("`", "")
+        line = re.sub(r" {2,}", " ", line)
         lines.append(line.strip())
     text = "\n".join(lines)
     text = re.sub(r"\n{3,}", "\n\n", text)

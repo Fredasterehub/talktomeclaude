@@ -206,7 +206,10 @@ class SSHCommandTests(unittest.TestCase):
         with mock.patch.object(os, "name", "nt"):
             command = listen._ssh_base("dev@example")
 
-        self.assertEqual(command, ["ssh", "-o", "ConnectTimeout=10", "dev@example"])
+        self.assertEqual(
+            command,
+            ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "dev@example"],
+        )
         self.assertFalse(any("Control" in arg for arg in command))
 
     def test_remote_cwd_is_shell_quoted_in_claude_command(self) -> None:
@@ -289,6 +292,29 @@ class TranscriberFallbackTests(unittest.TestCase):
         self.assertEqual(transcriber.tier.device, "cpu")
         self.assertTrue(any("degraded" in message for message in statuses))
 
+    def test_live_auto_cuda_lazy_decode_failure_falls_back_to_cpu(self) -> None:
+        def failed_segments():
+            raise RuntimeError("cuDNN failed while decoding")
+            yield
+
+        gpu = mock.Mock()
+        gpu.transcribe.return_value = (failed_segments(), None)
+        cpu = mock.Mock()
+        cpu.transcribe.return_value = ([SimpleNamespace(text=" recovered ")], None)
+        statuses: list[str] = []
+
+        with mock.patch.object(
+            listen, "detect_tier", side_effect=[GPU_TIER, CPU_TIER]
+        ), mock.patch.object(
+            listen.UtteranceTranscriber, "_load", side_effect=[gpu, cpu]
+        ):
+            transcriber = listen.UtteranceTranscriber("auto", on_status=statuses.append)
+            result = transcriber.transcribe(object())
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(transcriber.tier.device, "cpu")
+        self.assertTrue(any("degraded" in message for message in statuses))
+
 
 class RemoteCwdConfigAndCLITests(unittest.TestCase):
     def setUp(self) -> None:
@@ -296,7 +322,7 @@ class RemoteCwdConfigAndCLITests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.env = mock.patch.dict(
             os.environ,
-            {"CLAUDE_PLUGIN_DATA": self.tempdir.name},
+            {"TALKTOMECLAUDE_CONFIG_DIR": self.tempdir.name},
             clear=False,
         )
         self.env.start()

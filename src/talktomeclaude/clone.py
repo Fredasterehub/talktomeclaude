@@ -24,11 +24,30 @@ import numpy as np
 from talktomeclaude.tts import TTSError
 
 _SAMPLE_RATE_FALLBACK = 24000
+_YTDLP_MAX_FILESIZE = "250M"
 _model = None  # cached ChatterboxTTS singleton for this process
 
 
 class CloneError(TTSError):
     """Raised when voice cloning cannot proceed."""
+
+
+def ytdlp_command(url: str, dest: str) -> list[str]:
+    """Build the yt-dlp argv for downloading a YouTube reference audio source."""
+    return [
+        "yt-dlp",
+        "--no-playlist",
+        "--format",
+        "bestaudio[ext=m4a]/bestaudio",
+        "--extractor-args",
+        "youtube:player_client=android_vr,web,tv",
+        "--max-filesize",
+        _YTDLP_MAX_FILESIZE,
+        "--output",
+        dest,
+        "--",
+        url,
+    ]
 
 
 def clone_cache_dir() -> Path:

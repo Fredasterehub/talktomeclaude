@@ -19,7 +19,31 @@ from talktomeclaude.tts import (
 def main(ctx: click.Context) -> None:
     """Use voice as a medium for Claude Code."""
     if ctx.invoked_subcommand is None:
+        from talktomeclaude import config, onboarding
+
+        if config.onboarding_needed(onboarding.CURRENT_ONBOARDING_VERSION):
+            onboarding.run_onboarding()
         _launch_dashboard()
+
+
+@main.command()
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Reset the stored onboarding version and run setup again.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force the onboarding wizard to run even when setup is current.",
+)
+def setup(reset: bool, force: bool) -> None:
+    """Run setup, with reset and force options for onboarding re-entry."""
+    from talktomeclaude import config, onboarding
+
+    if reset:
+        config.set_onboarding_version(0)
+    onboarding.run_onboarding()
 
 
 @main.command()
@@ -64,22 +88,12 @@ def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
 
 
 def _play_wav(path: Path) -> None:
-    import wave
+    from talktomeclaude.tts import play_wav
 
     try:
-        import numpy
-        import sounddevice
-    except (ImportError, OSError) as exc:
-        raise click.ClickException(
-            f"audio playback unavailable ({exc}); use --out to write a WAV file"
-        ) from exc
-    with wave.open(str(path), "rb") as wav:
-        frames = wav.readframes(wav.getnframes())
-        samples = numpy.frombuffer(frames, dtype=numpy.int16)
-        channels = wav.getnchannels()
-        if channels > 1:
-            samples = samples.reshape(-1, channels)
-        sounddevice.play(samples, samplerate=wav.getframerate(), blocking=True)
+        play_wav(path)
+    except TTSError as exc:
+        raise click.ClickException(f"{exc}; use --out to write a WAV file") from exc
 
 
 def _temporary_wav_path(prefix: str) -> Path:
@@ -331,9 +345,9 @@ def voice_create(
 @click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
-    default="auto",
-    show_default=True,
-    help="Hardware tier: auto-detect picks the GPU tier when CUDA is present.",
+    default=None,
+    help="Hardware tier for this run; defaults to the persisted stt-device setting "
+    "(auto-detect picks the GPU tier when CUDA is present).",
 )
 @click.option(
     "--model",
@@ -352,14 +366,17 @@ def voice_create(
     is_flag=True,
     help="Report the active tier and any degradation on stderr.",
 )
-def transcribe(audio: Path, device: str, model_name: str | None, show_tier: bool, verbose: bool) -> None:
+def transcribe(audio: Path, device: str | None, model_name: str | None, show_tier: bool, verbose: bool) -> None:
     """Transcribe an AUDIO file locally with Whisper-class speech-to-text.
 
     Auto-detects the hardware tier: a CUDA GPU carries the largest fluid
     model; CPU-only machines use the most accurate model that stays fluid.
     Tier fallbacks are always reported on stderr — never silent.
     """
+    from talktomeclaude import config as settings
     from talktomeclaude.stt import STTError, detect_tier, transcribe_file
+
+    device = device or settings.stt_device()
 
     if show_tier:
         try:
@@ -427,15 +444,21 @@ def filter_command(transcript) -> None:
 @click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
-    default="auto",
-    show_default=True,
-    help="Hardware tier: auto-detect picks the GPU tier when CUDA is present.",
+    default=None,
+    help="Hardware tier for this run; defaults to the persisted stt-device setting.",
 )
 @click.option(
     "--model",
     "model_name",
     default=None,
     help="Override the Whisper model for the active tier (e.g. large-v3, small.en).",
+)
+@click.option(
+    "--permission",
+    type=click.Choice(["off", "skip", "acceptEdits", "bypassPermissions"]),
+    default=None,
+    help="Claude Code permission posture for this run; persist it with "
+    "`config set claude-permissions`.",
 )
 @click.option("--once", is_flag=True, help="Handle a single utterance, then exit.")
 def listen(
@@ -444,8 +467,9 @@ def listen(
     tmux_pane: str | None,
     remote: str | None,
     remote_cwd: str | None,
-    device: str,
+    device: str | None,
     model_name: str | None,
+    permission: str | None,
     once: bool,
 ) -> None:
     """Listen to the microphone and drive Claude Code by voice.
@@ -471,6 +495,8 @@ def listen(
     from talktomeclaude.listen import ListenError, run_listen
 
     active_mode = mode or config.recording_mode()
+    active_device = device or config.stt_device()
+    active_permission = permission or config.claude_permissions()
     active_remote = remote or config.remote()
     if remote_cwd is not None and not active_remote:
         raise click.ClickException("--remote-cwd requires --remote or a persisted remote")
@@ -483,7 +509,7 @@ def listen(
             mode=active_mode,
             session_id=session_id,
             tmux_pane=tmux_pane,
-            device=device,
+            device=active_device,
             model=model_name,
             once=once,
             echo=click.echo,
@@ -491,6 +517,7 @@ def listen(
             status=lambda message: click.echo(message, err=True),
             remote=active_remote,
             remote_cwd=active_remote_cwd,
+            permission=active_permission,
         )
     except ListenError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -512,7 +539,13 @@ def config_set(key: str, value: str) -> None:
     Known keys: recording-mode (always-on, push-to-talk, push-toggle),
     voice-assist (on, off), remote (user@host, or "local"/"none" to clear),
     remote-cwd (remote project path, or "home"/"none" to clear),
-    barge-in (on, off), and default-voice (a voice name, or "auto"/"none" to clear).
+    barge-in (on, off), claude-permissions (off, skip, acceptEdits,
+    bypassPermissions), wake-word (on, off), wake-phrase (the spoken phrase),
+    wake-model (path to a trained wake-word model, or "none" to clear),
+    default-voice (a voice name, or "auto"/"none" to clear),
+    stt-device (auto, cuda, cpu), command-namespace-policy (allow-all,
+    ask-first-use, allowlist), and command-namespace-allowlist
+    (comma-separated namespaces, or "none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -539,14 +572,47 @@ def config_set(key: str, value: str) -> None:
                 f"invalid barge-in value {value!r}: expected on or off"
             )
         settings.set_barge_in(value == "on")
+    elif key == "claude-permissions":
+        try:
+            settings.set_claude_permissions(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "wake-word":
+        if value not in ("on", "off"):
+            raise click.ClickException(
+                f"invalid wake-word value {value!r}: expected on or off"
+            )
+        settings.set_wake_word(value == "on")
+    elif key == "wake-phrase":
+        settings.set_wake_phrase(value)
+    elif key == "wake-model":
+        settings.set_wake_model_path(
+            None if value.lower() in ("", "none", "off") else value
+        )
     elif key == "default-voice":
         settings.set_default_voice(
             None if value.lower() in ("", "auto", "none", "default") else value
         )
+    elif key == "stt-device":
+        try:
+            settings.set_stt_device(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "command-namespace-policy":
+        try:
+            settings.set_command_namespace_policy(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "command-namespace-allowlist":
+        settings.set_command_namespace_allowlist(
+            None if value.lower() in ("", "none", "off") else value
+        )
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
-            "remote-cwd, barge-in, or default-voice"
+            "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
+            "wake-model, default-voice, stt-device, command-namespace-policy, "
+            "or command-namespace-allowlist"
         )
     click.echo(f"{key} = {value}")
 
@@ -567,12 +633,28 @@ def config_get(key: str) -> None:
         click.echo(settings.remote_cwd() or "home")
     elif key == "barge-in":
         click.echo("on" if settings.barge_in_enabled() else "off")
+    elif key == "claude-permissions":
+        click.echo(settings.claude_permissions())
+    elif key == "wake-word":
+        click.echo("on" if settings.wake_word_enabled() else "off")
+    elif key == "wake-phrase":
+        click.echo(settings.wake_phrase())
+    elif key == "wake-model":
+        click.echo(settings.wake_model_path() or "none")
     elif key == "default-voice":
         click.echo(settings.default_voice_name() or "auto")
+    elif key == "stt-device":
+        click.echo(settings.stt_device())
+    elif key == "command-namespace-policy":
+        click.echo(settings.command_namespace_policy())
+    elif key == "command-namespace-allowlist":
+        click.echo(", ".join(settings.command_namespace_allowlist()) or "none")
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
-            "remote-cwd, barge-in, or default-voice"
+            "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
+            "wake-model, default-voice, stt-device, command-namespace-policy, "
+            "or command-namespace-allowlist"
         )
 
 

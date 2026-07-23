@@ -25,6 +25,17 @@ class CloneModelFreeTests(unittest.TestCase):
     def test_clone_error_is_a_tts_error(self) -> None:
         self.assertTrue(issubclass(clone.CloneError, TTSError))
 
+    def test_ytdlp_command_is_a_pure_argv_builder_with_required_clients(self) -> None:
+        command = clone.ytdlp_command("https://youtu.be/example", "agent-cut.m4a")
+        self.assertEqual(command[0], "yt-dlp")
+        self.assertIn("--extractor-args", command)
+        self.assertIn("youtube:player_client=android_vr,web,tv", command)
+        self.assertIn("--max-filesize", command)
+        self.assertEqual(
+            command[command.index("--max-filesize") + 1], clone._YTDLP_MAX_FILESIZE
+        )
+        self.assertEqual(command[-2:], ["--", "https://youtu.be/example"])
+
     def test_empty_text_raises_before_loading_the_model(self) -> None:
         with mock.patch.object(clone, "_load_model") as load:
             with self.assertRaises(clone.CloneError):

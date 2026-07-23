@@ -109,6 +109,11 @@ substantially faster.
 Do not delete model caches during ordinary upgrades. A Hugging Face token belongs in
 `HF_TOKEN` or the Hugging Face credential store, never in the repository or this file.
 
+The dashboard's optional YouTube reference workflow also requires `yt-dlp`, `ffmpeg`,
+and `ffprobe` on `PATH`. These are external media tools, not Python package
+dependencies. File and microphone references do not require `yt-dlp`; media formats
+that need conversion still require FFmpeg.
+
 ## Voice Registry
 
 Persistent settings and voice references live outside the checkout:
