@@ -16,7 +16,7 @@ class ConfigSettingsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": self.tmp.name}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": self.tmp.name}, clear=False
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -61,6 +61,20 @@ class ConfigSettingsTests(unittest.TestCase):
         self.assertEqual(config.wake_phrase(), "hey claude")
         config.set_wake_phrase("yo claude")
         self.assertEqual(config.wake_phrase(), "yo claude")
+
+    def test_assist_state_written_outside_is_read_inside_the_plugin_env(self) -> None:
+        # LAW assist-mute: `assist off` from a normal shell must be the exact
+        # state the Stop hook reads while Claude Code sets CLAUDE_PLUGIN_DATA.
+        config.set_voice_assist(False)
+        outside_path = config.config_path()
+        with tempfile.TemporaryDirectory() as plugin_data:
+            with mock.patch.dict(
+                os.environ, {"CLAUDE_PLUGIN_DATA": plugin_data}, clear=False
+            ):
+                self.assertEqual(config.config_path(), outside_path)
+                self.assertFalse(config.voice_assist_enabled())
+        config.set_voice_assist(True)
+        self.assertTrue(config.voice_assist_enabled())
 
 
 if __name__ == "__main__":

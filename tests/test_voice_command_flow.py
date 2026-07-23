@@ -18,7 +18,7 @@ class _Isolated(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": self.tmp.name}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": self.tmp.name}, clear=False
         )
         env.start()
         self.addCleanup(env.stop)

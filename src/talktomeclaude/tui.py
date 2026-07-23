@@ -557,6 +557,10 @@ class TalkToMeApp(App[None]):
     mode: reactive[str] = reactive("always-on")
     voice_enabled: reactive[bool] = reactive(True)
     wake_enabled: reactive[bool] = reactive(False)
+    # Availability is a separate axis from the persisted opt-in: wake mode
+    # without a usable detector model means the microphone is NOT gated, and
+    # the chip must never claim otherwise.
+    wake_ready: reactive[bool] = reactive(True)
     remote: reactive[str | None] = reactive(None)
     remote_cwd: reactive[str | None] = reactive(None)
 
@@ -604,6 +608,7 @@ class TalkToMeApp(App[None]):
         self.mode = config.recording_mode()
         self.voice_enabled = config.voice_assist_enabled()
         self.wake_enabled = config.wake_word_enabled()
+        self.wake_ready = config.wake_model_path() is not None
         self.remote = config.remote()
         self.remote_cwd = config.remote_cwd()
         self.query_one("#signal").border_title = "SIGNAL"
@@ -642,9 +647,13 @@ class TalkToMeApp(App[None]):
             "VOICE ON" if self.voice_enabled else "VOICE MUTED"
         )
         self.query_one("#source-chip", Static).update(f"SRC {self._source()}")
-        self.query_one("#wake-chip", Static).update(
-            "WAKE ON" if self.wake_enabled else "WAKE OFF"
-        )
+        if not self.wake_enabled:
+            wake_label = "WAKE OFF"
+        elif self.wake_ready:
+            wake_label = "WAKE ON"
+        else:
+            wake_label = "WAKE UNGATED"
+        self.query_one("#wake-chip", Static).update(wake_label)
 
     def _paint_status(self) -> None:
         self.query_one("#status", Static).update(self.notice)
@@ -691,6 +700,10 @@ class TalkToMeApp(App[None]):
             self._paint_chips()
 
     def watch_wake_enabled(self, _enabled: bool) -> None:
+        if self._ui_ready:
+            self._paint_chips()
+
+    def watch_wake_ready(self, _ready: bool) -> None:
         if self._ui_ready:
             self._paint_chips()
 
@@ -839,6 +852,8 @@ class TalkToMeApp(App[None]):
         if text.startswith("stt tier:"):
             self.tier = text.removeprefix("stt tier:").strip()
         elif "degraded" in text.lower() or text.startswith("error:"):
+            if "listening ungated" in text:
+                self.wake_ready = False
             self.notice = text.removeprefix("error:").strip()
 
     def on_phase(self, message: Phase) -> None:
@@ -878,11 +893,16 @@ class TalkToMeApp(App[None]):
     def action_wake(self) -> None:
         self.wake_enabled = not self.wake_enabled
         config.set_wake_word(self.wake_enabled)
-        self.notice = (
-            "Wake word on — hands-free capture waits for the wake phrase"
-            if self.wake_enabled
-            else "Wake word off — hands-free capture starts immediately"
-        )
+        self.wake_ready = config.wake_model_path() is not None
+        if not self.wake_enabled:
+            self.notice = "Wake word off — hands-free capture starts immediately"
+        elif self.wake_ready:
+            self.notice = "Wake word on — hands-free capture waits for the wake phrase"
+        else:
+            self.notice = (
+                "Wake word has no detector model — listening stays ungated "
+                "(config set wake-model /path/to/model.onnx)"
+            )
 
     def action_clone(self) -> None:
         if self._voice_running:

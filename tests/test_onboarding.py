@@ -17,7 +17,7 @@ class OnboardingConfigTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": self.tmp.name}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": self.tmp.name}, clear=False
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -40,7 +40,7 @@ class SetupCommandTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": self.tmp.name}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": self.tmp.name}, clear=False
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -100,7 +100,7 @@ class OnboardingScreenTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.dict(
-                os.environ, {"CLAUDE_PLUGIN_DATA": directory}, clear=False
+                os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": directory}, clear=False
             ):
                 result: dict = {}
                 screen = OnboardingScreen()

@@ -299,7 +299,7 @@ class RemoteCwdConfigAndCLITests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.env = mock.patch.dict(
             os.environ,
-            {"CLAUDE_PLUGIN_DATA": self.tempdir.name},
+            {"TALKTOMECLAUDE_CONFIG_DIR": self.tempdir.name},
             clear=False,
         )
         self.env.start()

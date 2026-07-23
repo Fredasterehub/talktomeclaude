@@ -1,8 +1,11 @@
 """Persistent configuration state shared by the CLI and the Claude Code hook.
 
-Settings live in a single JSON file under ``CLAUDE_PLUGIN_DATA`` when Claude
-Code provides it (that directory survives plugin updates), falling back to
-the user's XDG config directory for standalone CLI use.
+Settings live in a single JSON file at one stable location — an explicit
+``TALKTOMECLAUDE_CONFIG_DIR`` override, else the user's XDG config directory
+— so a setting written from a normal shell is exactly the state the installed
+hook reads. ``CLAUDE_PLUGIN_DATA`` is deliberately ignored: Claude Code hands
+it to the hook while the shell CLI never sees it, and honoring it would split
+state across two files (an ``assist off`` that never mutes the hook).
 """
 
 import json
@@ -18,10 +21,10 @@ CLAUDE_PERMISSIONS = ("off", "skip", "acceptEdits", "bypassPermissions")
 
 
 def config_dir() -> Path:
-    """Directory holding persistent state."""
-    plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
-    if plugin_data:
-        return Path(plugin_data)
+    """Directory holding persistent state — identical in every environment."""
+    override = os.environ.get("TALKTOMECLAUDE_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
     xdg = os.environ.get("XDG_CONFIG_HOME")
     base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
     return base / "talktomeclaude"

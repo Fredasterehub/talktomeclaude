@@ -217,7 +217,7 @@ def _wake_gate(
     if not model_path:
         state["degraded"] = True
         status(
-            "wake word is on but no detector model is configured "
+            "wake word degraded: no detector model is configured "
             "(config set wake-model /path/to/model.onnx); listening ungated"
         )
         return True
@@ -262,17 +262,24 @@ def _speak_interruptible(
     speak: Callable[[str], None],
     text: str,
     stop_event: "threading.Event | None" = None,
-) -> bool:
+):
     """Play *text* while watching the microphone, halting playback the moment
-    the operator speaks. Returns True when the operator barged in.
+    the operator speaks. Returns the operator's interrupting utterance as
+    captured audio — the barge-in IS the next turn, never a repeat — or None
+    when playback finished undisturbed (or the session is stopping).
 
     Playback runs on a worker thread; detection watches microphone energy
     against a floor calibrated just before playback starts (the headphone
-    gate keeps the TTS voice out of the microphone). Playback is terminated
-    through ``sounddevice.stop()``, which halts the active output stream.
+    gate keeps the TTS voice out of the microphone). On detection, playback
+    is terminated through ``sounddevice.stop()`` while the input stream stays
+    open, capturing the rest of the utterance until a trailing pause. A
+    rolling pre-roll keeps the words that triggered detection.
     """
     sounddevice = _sounddevice()
     blocksize = int(_BLOCK_SECONDS * SAMPLE_RATE)
+    preroll_blocks = max(1, int(_PREROLL_SECONDS / _BLOCK_SECONDS))
+    hang_blocks = max(1, int(_SILENCE_HANG_SECONDS / _BLOCK_SECONDS))
+    max_blocks = int(_MAX_UTTERANCE_SECONDS / _BLOCK_SECONDS)
     failure: list[BaseException] = []
     done = threading.Event()
 
@@ -284,7 +291,8 @@ def _speak_interruptible(
         finally:
             done.set()
 
-    interrupted = False
+    stopping = lambda: stop_event is not None and stop_event.is_set()
+    chunks: list = []
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
@@ -296,23 +304,41 @@ def _speak_interruptible(
         worker = threading.Thread(target=playback, daemon=True)
         worker.start()
         voiced = 0
+        preroll: list = []
         while not done.is_set():
-            if stop_event is not None and stop_event.is_set():
+            if stopping():
                 break
             block, _overflowed = stream.read(blocksize)
+            preroll.append(block.copy())
+            if len(preroll) > preroll_blocks:
+                preroll.pop(0)
             voiced = voiced + 1 if _rms(block) >= threshold else 0
             if voiced >= _BARGE_IN_VOICED_BLOCKS:
-                interrupted = True
+                # Barge-in: halt playback, then keep the already-open stream
+                # capturing the interruption until a trailing pause.
+                try:
+                    sounddevice.stop()
+                except Exception:
+                    pass
+                chunks = list(preroll)
+                silent_blocks = 0
+                while len(chunks) < max_blocks and not stopping():
+                    block, _overflowed = stream.read(blocksize)
+                    chunks.append(block.copy())
+                    silent_blocks = silent_blocks + 1 if _rms(block) < threshold else 0
+                    if silent_blocks >= hang_blocks:
+                        break
                 break
-    if interrupted or (stop_event is not None and stop_event.is_set()):
+    if stopping():
         try:
             sounddevice.stop()
         except Exception:
             pass
+        chunks = []
     worker.join(5.0)
     if failure:
         raise failure[0]
-    return interrupted
+    return _finish(chunks)
 
 
 def _chunk_heading(text: str) -> str:
@@ -1199,12 +1225,13 @@ def run_listen(
                 start_immediately=record_now,
             )
 
-    def deliver(text: str) -> bool:
-        """Speak *text*; True when the operator barged in over the playback."""
+    def deliver(text: str):
+        """Speak *text*; returns the operator's interrupting utterance as
+        captured audio when barge-in halted the playback, else None."""
         if barge:
             return _speak_interruptible(speak, text, stop_event=stop_event)
         speak(text)
-        return False
+        return None
 
     def deliver_reply(dialogue: str, active_session: str | None) -> str | None:
         """The voice-conveyance checkpoint loop.
@@ -1212,26 +1239,37 @@ def run_listen(
         Long replies are spoken gradually: after each chunk the cursor,
         heading, and status persist to the session scratchpad, the microphone
         reopens, and an exact feedback verb steers delivery. A content-bearing
-        utterance heard at a checkpoint is returned so it resumes through the
-        same session as the next ordinary turn.
+        utterance — heard at a checkpoint or barged in over the playback — is
+        returned so it resumes through the same session as the next ordinary
+        turn: the interruption continues the conversation, never repeats it.
         """
         chunks = conveyance.chunk(dialogue)
         if once or len(chunks) <= 1:
             set_phase("speaking")
-            deliver(dialogue)
-            return None
+            interrupt = deliver(dialogue)
+            if interrupt is None:
+                return None
+            set_phase("transcribing")
+            heard = transcriber.transcribe(interrupt).strip()
+            # A bare verb has nothing left to steer here — playback already
+            # stopped; content flows back into the same resumed session.
+            if not heard or detect_verb(heard) is not None:
+                return None
+            return heard
         cursor = 0
         while cursor < len(chunks):
             current = chunks[cursor]
             _write_checkpoint(active_session, cursor, _chunk_heading(current), "delivering")
             set_phase("speaking")
-            deliver(current)
-            if cursor == len(chunks) - 1:
+            interrupt = deliver(current)
+            if interrupt is None and cursor == len(chunks) - 1:
                 break
             if stop_event is not None and stop_event.is_set():
                 _write_checkpoint(active_session, cursor, _chunk_heading(current), "stopped")
                 return None
-            audio = capture()  # the checkpoint: the mic reopens between chunks
+            # A barged-in utterance is the checkpoint utterance — same verbs,
+            # same content routing — without waiting for the chunk to finish.
+            audio = interrupt if interrupt is not None else capture()
             if audio is None:
                 if stop_event is not None and stop_event.is_set():
                     _write_checkpoint(

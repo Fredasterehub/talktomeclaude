@@ -53,6 +53,35 @@ class TalkToMeAppTests(_ConfigIsolation):
             chip = app.query_one("#wake-chip", tui.Static)
             self.assertIn("WAKE", chip.render().plain)
 
+    async def test_wake_chip_never_claims_on_without_a_detector_model(self) -> None:
+        from talktomeclaude import config
+
+        config.set_wake_word(True)  # opted in, but no wake-model configured
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chip = app.query_one("#wake-chip", tui.Static)
+            self.assertEqual(chip.render().plain, "WAKE UNGATED")
+
+    async def test_wake_degraded_status_flips_the_chip_and_surfaces_why(self) -> None:
+        from talktomeclaude import config
+
+        config.set_wake_word(True)
+        config.set_wake_model_path("/models/yo-claude.onnx")
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chip = app.query_one("#wake-chip", tui.Static)
+            self.assertEqual(chip.render().plain, "WAKE ON")
+            warning = (
+                "wake word degraded: no detector model is configured "
+                "(config set wake-model /path/to/model.onnx); listening ungated"
+            )
+            app.post_message(tui.Status(warning))
+            await pilot.pause()
+            self.assertEqual(chip.render().plain, "WAKE UNGATED")
+            self.assertIn("ungated", app.notice)
+
     async def test_reduced_motion_disables_animation(self) -> None:
         with mock.patch.dict(os.environ, {"TALKTOMECLAUDE_REDUCED_MOTION": "1"}):
             app = TalkToMeApp(lambda _text: None)
