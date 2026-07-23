@@ -8,9 +8,10 @@ it to the hook while the shell CLI never sees it, and honoring it would split
 state across two files (an ``assist off`` that never mutes the hook).
 """
 
-import json
 import os
 from pathlib import Path
+
+from talktomeclaude.storage import AtomicStorageError, ConfigStore
 
 _CONFIG_FILE = "config.json"
 _NATIVE_PATH = type(Path())
@@ -42,13 +43,14 @@ def config_path() -> Path:
     return config_dir() / _CONFIG_FILE
 
 
+def _store() -> ConfigStore:
+    return ConfigStore(config_path())
+
+
 def _load_checked() -> dict:
     try:
-        with config_path().open(encoding="utf-8") as handle:
-            settings = json.load(handle)
-    except FileNotFoundError:
-        return {}
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        settings = _store().load()
+    except (OSError, UnicodeError, AtomicStorageError) as exc:
         raise ConfigLoadError(f"configuration is unreadable ({exc})") from exc
     if not isinstance(settings, dict):
         raise ConfigLoadError("configuration root must be an object")
@@ -63,11 +65,10 @@ def load() -> dict:
 
 
 def save(settings: dict) -> None:
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    swap = path.with_name(path.name + ".tmp")
-    swap.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    swap.replace(path)
+    try:
+        _store().save(settings)
+    except (OSError, AtomicStorageError) as exc:
+        raise ConfigLoadError(f"configuration is unwritable ({exc})") from exc
 
 
 def get_value(key: str, default=None):
@@ -75,9 +76,20 @@ def get_value(key: str, default=None):
 
 
 def set_value(key: str, value) -> None:
-    settings = load()
-    settings[key] = value
-    save(settings)
+    try:
+        _store().update(lambda settings: settings.__setitem__(key, value))
+    except (OSError, AtomicStorageError) as exc:
+        raise ConfigLoadError(f"configuration is unwritable ({exc})") from exc
+
+
+def _clear_value(key: str) -> None:
+    def clear(settings: dict) -> None:
+        settings.pop(key, None)
+
+    try:
+        _store().update(clear)
+    except (OSError, AtomicStorageError) as exc:
+        raise ConfigLoadError(f"configuration is unwritable ({exc})") from exc
 
 
 def recording_mode() -> str:
@@ -139,9 +151,7 @@ def set_command_namespace_allowlist(value: str | None) -> None:
     if value and value.strip():
         set_value("command-namespace-allowlist", value.strip())
     else:
-        settings = load()
-        settings.pop("command-namespace-allowlist", None)
-        save(settings)
+        _clear_value("command-namespace-allowlist")
 
 
 def clone_recipe_choice() -> str:
@@ -210,9 +220,7 @@ def set_remote(value: str | None) -> None:
     if value and value.strip():
         set_value("remote", value.strip())
     else:
-        settings = load()
-        settings.pop("remote", None)
-        save(settings)
+        _clear_value("remote")
 
 
 def remote_cwd() -> str | None:
@@ -227,9 +235,7 @@ def set_remote_cwd(value: str | None) -> None:
     if value and value.strip():
         set_value("remote-cwd", value)
     else:
-        settings = load()
-        settings.pop("remote-cwd", None)
-        save(settings)
+        _clear_value("remote-cwd")
 
 
 def barge_in_enabled() -> bool:
@@ -283,9 +289,7 @@ def set_wake_model_path(value: str | None) -> None:
     if value and value.strip():
         set_value("wake-model", value.strip())
     else:
-        settings = load()
-        settings.pop("wake-model", None)
-        save(settings)
+        _clear_value("wake-model")
 
 
 def onboarding_completed_at() -> str | None:
@@ -311,6 +315,4 @@ def set_default_voice(value: str | None) -> None:
     if value and value.strip():
         set_value("default-voice", value.strip())
     else:
-        settings = load()
-        settings.pop("default-voice", None)
-        save(settings)
+        _clear_value("default-voice")

@@ -158,6 +158,30 @@ def ui() -> None:
     _launch_dashboard()
 
 
+@main.command()
+def tui() -> None:
+    """Open the legacy interactive voice dashboard."""
+    _launch_dashboard()
+
+
+@main.command()
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="Start the non-graphical companion recovery path.",
+)
+def companion(headless: bool) -> None:
+    """Start the staged Windows companion."""
+    if not headless:
+        raise click.ClickException(
+            "the desktop companion is not connected yet; use --headless for recovery"
+        )
+
+    from talktomeclaude.companion.headless import run_headless
+
+    run_headless(click.echo)
+
+
 @main.group(invoke_without_command=True)
 @click.option(
     "--download",
@@ -306,7 +330,8 @@ def voice_create(
     if (reference is None) == (record_seconds is None):
         raise click.ClickException("provide exactly one of --reference PATH or --record SECONDS")
 
-    status = lambda message: click.echo(message, err=True)
+    def status(message: str) -> None:
+        click.echo(message, err=True)
     capture: Path | None = None
     if record_seconds is not None:
         capture = _temporary_wav_path(f"ttmc-ref-{name}-")
