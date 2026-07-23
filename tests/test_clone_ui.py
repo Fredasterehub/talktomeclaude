@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ from unittest import mock
 
 from textual.app import App, ComposeResult
 from textual.screen import Screen
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from talktomeclaude import clone_ui
 
@@ -56,6 +57,26 @@ class SegmentSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             clone_ui._parse_selection(payload, candidates)
 
+    def test_fallback_transcript_uses_only_fully_contained_segments(self) -> None:
+        transcript = clone_ui._transcript_for_bounds(self.segments, (3.0, 18.0))
+        self.assertEqual(transcript, "part 5 part 10")
+
+    def test_download_rejects_file_over_size_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def download(_command, **_kwargs):
+                (root / "source.m4a").write_bytes(b"oversized")
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            with mock.patch.object(
+                clone_ui, "_MAX_DOWNLOAD_BYTES", 4
+            ), mock.patch.object(
+                clone_ui.subprocess, "run", side_effect=download
+            ):
+                with self.assertRaisesRegex(RuntimeError, "size cap"):
+                    clone_ui.download_youtube_audio("https://youtu.be/example", root)
+
     def test_scoped_selection_call_is_isolated_and_bounded(self) -> None:
         candidates = clone_ui.generate_segment_candidates(self.segments, 30.0)
         completed = subprocess.CompletedProcess(
@@ -66,10 +87,16 @@ class SegmentSelectionTests(unittest.TestCase):
             ),
             "",
         )
-        with mock.patch.object(
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ, {"TTMC_UNSAFE_ENV": "operator-project"}, clear=False
+        ), mock.patch.object(
             clone_ui.subprocess, "run", return_value=completed
         ) as run:
-            selected, reason = clone_ui.select_segment_candidate(candidates)
+            selected, reason = clone_ui.select_segment_candidate(
+                candidates, Path(directory)
+            )
+            model_cwd = Path(run.call_args.kwargs["cwd"])
+            self.assertEqual(list(model_cwd.iterdir()), [])
 
         command = run.call_args.args[0]
         self.assertEqual(selected, candidates[0])
@@ -77,8 +104,13 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertIn("-p", command)
         self.assertIn("--output-format", command)
         self.assertNotIn("--resume", command)
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertEqual(command[command.index("--disallowedTools") + 1], "*")
+        self.assertEqual(command[command.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(command[command.index("--setting-sources") + 1], "")
         self.assertLessEqual(len(command[2]), clone_ui._MAX_PROMPT_CHARS)
         self.assertEqual(run.call_args.kwargs["timeout"], clone_ui._SELECTION_TIMEOUT)
+        self.assertNotIn("TTMC_UNSAFE_ENV", run.call_args.kwargs["env"])
 
     def test_selection_timeout_uses_fixed_cut_with_transcript(self) -> None:
         self._assert_fallback(
@@ -102,9 +134,15 @@ class SegmentSelectionTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, response, "")
             with mock.patch.object(
                 clone_ui, "probe_duration", return_value=30.0
+            ), mock.patch.object(
+                clone_ui,
+                "bound_source_for_stt",
+                return_value=root / "stt-source.wav",
             ), mock.patch(
                 "talktomeclaude.stt.transcribe_file_with_timestamps",
                 return_value=(self.segments, mock.sentinel.tier),
+            ) as transcribe, mock.patch(
+                "talktomeclaude.config.stt_device", return_value="cpu"
             ), mock.patch.object(
                 clone_ui, "cut_segment", return_value=root / "segment.wav"
             ) as cut, mock.patch.object(
@@ -116,6 +154,7 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertEqual(selection.bounds, (0.0, 15.0))
         self.assertEqual(selection.reason, "steady clean speech")
         self.assertEqual(selection.transcript, "part 0 part 5 part 10")
+        transcribe.assert_called_once_with(root / "stt-source.wav", device="cpu")
         cut.assert_called_once_with(
             source,
             root / "segment.wav",
@@ -146,6 +185,83 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertTrue(selection.fallback)
         self.assertIn("selection cap", selection.reason)
 
+    def test_underreported_source_is_physically_bounded_before_transcription(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.m4a"
+            bounded = root / "stt-source.wav"
+            source.write_bytes(b"audio")
+            with mock.patch.object(
+                clone_ui, "probe_duration", return_value=30.0
+            ), mock.patch.object(
+                clone_ui, "bound_source_for_stt", return_value=bounded
+            ) as bound, mock.patch(
+                "talktomeclaude.stt.transcribe_file_with_timestamps",
+                return_value=(self.segments, mock.sentinel.tier),
+            ) as transcribe, mock.patch.object(
+                clone_ui,
+                "select_segment_candidate",
+                return_value=(
+                    clone_ui.SegmentCandidate("c1", (0.0, 15.0), "bounded"),
+                    "clean",
+                ),
+            ), mock.patch.object(
+                clone_ui, "cut_segment", return_value=root / "segment.wav"
+            ):
+                clone_ui.auto_select_segment(source, root)
+
+        bound.assert_called_once_with(source, root)
+        self.assertEqual(transcribe.call_args.args[0], bounded)
+
+    def test_persisted_stt_device_is_used_for_agent_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.m4a"
+            bounded = root / "stt-source.wav"
+            source.write_bytes(b"audio")
+            with mock.patch.object(
+                clone_ui, "probe_duration", return_value=30.0
+            ), mock.patch.object(
+                clone_ui, "bound_source_for_stt", return_value=bounded
+            ), mock.patch(
+                "talktomeclaude.config.stt_device", return_value="cuda"
+            ), mock.patch(
+                "talktomeclaude.stt.transcribe_file_with_timestamps",
+                return_value=(self.segments, mock.sentinel.tier),
+            ) as transcribe, mock.patch.object(
+                clone_ui,
+                "select_segment_candidate",
+                return_value=(
+                    clone_ui.SegmentCandidate("c1", (0.0, 15.0), "bounded"),
+                    "clean",
+                ),
+            ), mock.patch.object(
+                clone_ui, "cut_segment", return_value=root / "segment.wav"
+            ):
+                clone_ui.auto_select_segment(source, root)
+
+        transcribe.assert_called_once_with(bounded, device="cuda")
+
+    def test_stt_source_bound_uses_ffmpeg_duration_and_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.m4a"
+            source.write_bytes(b"audio")
+
+            def complete(_command, **_kwargs):
+                (root / "stt-source.wav").write_bytes(b"RIFF" + b"0" * 64)
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            with mock.patch.object(
+                clone_ui.subprocess, "run", side_effect=complete
+            ) as run:
+                result = clone_ui.bound_source_for_stt(source, root)
+
+        command = run.call_args.args[0]
+        self.assertEqual(result.name, "stt-source.wav")
+        self.assertEqual(command[command.index("-t") + 1], str(clone_ui._MAX_SOURCE_SECONDS))
+        self.assertEqual(run.call_args.kwargs["timeout"], clone_ui._BOUND_TIMEOUT)
+
     def _assert_fallback(self, failure, reason: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -155,6 +271,10 @@ class SegmentSelectionTests(unittest.TestCase):
             run_kwargs = {"side_effect": failure} if failure else {"return_value": completed}
             with mock.patch.object(
                 clone_ui, "probe_duration", return_value=30.0
+            ), mock.patch.object(
+                clone_ui,
+                "bound_source_for_stt",
+                return_value=root / "stt-source.wav",
             ), mock.patch(
                 "talktomeclaude.stt.transcribe_file_with_timestamps",
                 return_value=(self.segments, mock.sentinel.tier),
@@ -168,7 +288,7 @@ class SegmentSelectionTests(unittest.TestCase):
         self.assertTrue(selection.fallback)
         self.assertEqual(selection.bounds, (3.0, 18.0))
         self.assertIn(reason, selection.reason)
-        self.assertEqual(selection.transcript, "part 0 part 5 part 10 part 15")
+        self.assertEqual(selection.transcript, "part 5 part 10")
         cut.assert_called_once_with(
             source,
             root / "segment.wav",
@@ -384,6 +504,60 @@ class CloneScreenTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             self.assertIn("Fallback selection", str(provenance.render()))
+
+    async def test_review_pane_renders_bracketed_model_text_without_markup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            reference = Path(directory) / "selected.wav"
+            reference.write_bytes(b"RIFFreference")
+            screen = clone_ui.CloneScreen("safe", reference)
+            screen.selection = clone_ui.SegmentSelection(
+                reference,
+                (0.0, 15.0),
+                "clean take [/bold]",
+                "[Music] exact transcript",
+                False,
+            )
+
+            class _Host(App[None]):
+                def compose(self) -> ComposeResult:
+                    return
+                    yield
+
+                def on_mount(self) -> None:
+                    self.push_screen(screen)
+
+            async with _Host().run_test() as pilot:
+                await pilot.pause()
+                provenance = screen.query_one("#clone-selection-provenance", Static)
+                transcript = screen.query_one("#clone-selection-transcript", Static)
+
+            self.assertIn("[/bold]", str(provenance.render()))
+            self.assertIn("[Music]", str(transcript.render()))
+
+    async def test_non_http_youtube_url_is_rejected_before_download(self) -> None:
+        screen = clone_ui.CloneScreen("safe")
+
+        class _Host(App[None]):
+            def compose(self) -> ComposeResult:
+                return
+                yield
+
+            def on_mount(self) -> None:
+                self.push_screen(screen)
+
+        async with _Host().run_test() as pilot:
+            await pilot.pause()
+            screen._show_step("youtube")
+            await pilot.pause()
+            screen.query_one("#clone-url", Input).value = "--config-location=/tmp/evil"
+            with mock.patch.object(screen, "run_worker") as worker:
+                await pilot.press("enter")
+                await pilot.pause()
+            rendered = " ".join(str(widget.render()) for widget in screen.query(Static))
+
+        worker.assert_not_called()
+        self.assertEqual(screen._step, "youtube")
+        self.assertIn("must use http:// or https://", rendered)
 
 
 if __name__ == "__main__":

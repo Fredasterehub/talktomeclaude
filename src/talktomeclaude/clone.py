@@ -24,6 +24,7 @@ import numpy as np
 from talktomeclaude.tts import TTSError
 
 _SAMPLE_RATE_FALLBACK = 24000
+_YTDLP_MAX_FILESIZE = "250M"
 _model = None  # cached ChatterboxTTS singleton for this process
 
 
@@ -40,8 +41,11 @@ def ytdlp_command(url: str, dest: str) -> list[str]:
         "bestaudio[ext=m4a]/bestaudio",
         "--extractor-args",
         "youtube:player_client=android_vr,web,tv",
+        "--max-filesize",
+        _YTDLP_MAX_FILESIZE,
         "--output",
         dest,
+        "--",
         url,
     ]
 

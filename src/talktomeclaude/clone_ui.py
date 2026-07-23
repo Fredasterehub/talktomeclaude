@@ -11,12 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import os
 import shutil
 import subprocess
 import tempfile
 import wave
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlsplit
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -35,9 +37,11 @@ _MAX_SOURCE_SECONDS = 600.0
 _MAX_CANDIDATES = 12
 _MAX_PROMPT_CHARS = 16_000
 _MAX_MODEL_OUTPUT_CHARS = 4_096
+_MAX_DOWNLOAD_BYTES = 250 * 1024 * 1024
 _DOWNLOAD_TIMEOUT = 300
 _PROBE_TIMEOUT = 15
 _CUT_TIMEOUT = 30
+_BOUND_TIMEOUT = 120
 _SELECTION_TIMEOUT = 45
 
 _SOURCE_OPTIONS = (
@@ -84,6 +88,7 @@ def download_youtube_audio(url: str, workdir: Path) -> Path:
     """Download the audio track of a consented YouTube source with yt-dlp."""
     from talktomeclaude.clone import ytdlp_command
 
+    validate_youtube_url(url)
     dest = workdir / "source.m4a"
     command = ytdlp_command(url, str(dest))
     try:
@@ -103,7 +108,15 @@ def download_youtube_audio(url: str, workdir: Path) -> Path:
         raise RuntimeError(f"could not download the source audio: {detail}") from exc
     if not dest.is_file():
         raise RuntimeError("the YouTube download produced no audio file")
+    if dest.stat().st_size > _MAX_DOWNLOAD_BYTES:
+        raise RuntimeError("the YouTube download exceeded the 250 MiB size cap")
     return dest
+
+
+def validate_youtube_url(url: str) -> None:
+    parsed = urlsplit(url)
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError("the YouTube URL must use http:// or https://")
 
 
 def probe_duration(path: Path) -> float | None:
@@ -153,6 +166,34 @@ def cut_segment(
         raise RuntimeError(f"could not cut the reference segment: {detail}") from exc
     if not dest.is_file() or dest.stat().st_size <= 44:
         raise RuntimeError("segment cutting produced no audio")
+    return dest
+
+
+def bound_source_for_stt(source: Path, workdir: Path) -> Path:
+    """Decode at most the source-duration cap for timestamped transcription."""
+    dest = workdir / "stt-source.wav"
+    command = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-i", str(source), "-t", str(_MAX_SOURCE_SECONDS),
+        "-ac", "1", "-ar", "16000", str(dest),
+    ]
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_BOUND_TIMEOUT,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is required to bound the transcription source") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("transcription source bounding timed out") from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or f"exit {exc.returncode}"
+        raise RuntimeError(f"could not bound the transcription source: {detail}") from exc
+    if not dest.is_file() or dest.stat().st_size <= 44:
+        raise RuntimeError("transcription source bounding produced no audio")
     return dest
 
 
@@ -247,7 +288,37 @@ def _selection_prompt(candidates: list[SegmentCandidate]) -> str:
 
 def segment_selection_command(prompt: str) -> list[str]:
     claude = shutil.which("claude") or "claude"
-    return [claude, "-p", prompt, "--output-format", "json"]
+    return [
+        claude,
+        "-p",
+        prompt,
+        "--output-format",
+        "json",
+        "--tools",
+        "",
+        "--disallowedTools",
+        "*",
+        "--permission-mode",
+        "dontAsk",
+        "--setting-sources",
+        "",
+    ]
+
+
+def _selection_env() -> dict[str, str]:
+    exact = {
+        "HOME", "USERPROFILE", "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR",
+        "COMSPEC", "TMP", "TEMP", "TMPDIR", "LANG", "LC_ALL", "TERM",
+        "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    }
+    prefixes = ("AWS_", "GOOGLE_", "AZURE_")
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in exact or key.startswith(prefixes)
+    }
 
 
 def _parse_selection(stdout: str, candidates: list[SegmentCandidate]) -> tuple[str, str]:
@@ -273,16 +344,21 @@ def _parse_selection(stdout: str, candidates: list[SegmentCandidate]) -> tuple[s
     return candidate_id, reason.strip()
 
 
-def select_segment_candidate(candidates: list[SegmentCandidate]) -> tuple[SegmentCandidate, str]:
+def select_segment_candidate(
+    candidates: list[SegmentCandidate], workdir: Path
+) -> tuple[SegmentCandidate, str]:
     if not candidates or len(candidates) > _MAX_CANDIDATES:
         raise ValueError("no bounded segment candidates")
     prompt = _selection_prompt(candidates)
+    model_cwd = Path(tempfile.mkdtemp(prefix="claude-selection-", dir=workdir))
     result = subprocess.run(
         segment_selection_command(prompt),
         check=True,
         capture_output=True,
         text=True,
         timeout=_SELECTION_TIMEOUT,
+        cwd=model_cwd,
+        env=_selection_env(),
     )
     candidate_id, reason = _parse_selection(result.stdout, candidates)
     selected = next(
@@ -296,7 +372,7 @@ def _transcript_for_bounds(segments, bounds: tuple[float, float]) -> str:
     parts = []
     for segment in segments:
         try:
-            if float(segment.end) > start and float(segment.start) < end:
+            if float(segment.start) >= start and float(segment.end) <= end:
                 text = segment.text.strip()
                 if text:
                     parts.append(text)
@@ -317,7 +393,7 @@ def _fallback_reason(exc: Exception) -> str:
 
 def auto_select_segment(source: Path, workdir: Path) -> SegmentSelection:
     """Choose a bounded local candidate, then cut it for mandatory review."""
-    from talktomeclaude import stt
+    from talktomeclaude import config, stt
 
     duration = probe_duration(source)
     segments = []
@@ -328,9 +404,16 @@ def auto_select_segment(source: Path, workdir: Path) -> SegmentSelection:
             raise RuntimeError(
                 f"source exceeds the {_MAX_SOURCE_SECONDS:.0f}-second selection cap"
             )
-        segments, _tier = stt.transcribe_file_with_timestamps(source)
+        bounded_source = bound_source_for_stt(source, workdir)
+        try:
+            device = config.stt_device()
+        except Exception:
+            device = "auto"
+        segments, _tier = stt.transcribe_file_with_timestamps(
+            bounded_source, device=device
+        )
         candidates = generate_segment_candidates(segments, duration)
-        selected, reason = select_segment_candidate(candidates)
+        selected, reason = select_segment_candidate(candidates, workdir)
         bounds = selected.bounds
         transcript = selected.transcript
         fallback = False
@@ -402,22 +485,32 @@ class CloneScreen(Screen[bool]):
         if step == "name":
             yield Static("Name the new voice")
             yield Input(id="clone-name", placeholder="voice name")
-            yield Static(self._flow_error or "Enter Continue   ·   Esc Cancel")
+            yield Static(
+                self._flow_error or "Enter Continue   ·   Esc Cancel", markup=False
+            )
         elif step == "source":
-            yield Static(f"Choose a source for {self.voice_name!r} — own or consented audio only")
+            yield Static(
+                f"Choose a source for {self.voice_name!r} — own or consented audio only",
+                markup=False,
+            )
             yield OptionList(*_SOURCE_OPTIONS, id="clone-source")
             yield Static(
                 self._flow_error
-                or "Up/Down Choose   ·   Enter Select   ·   Esc Cancel"
+                or "Up/Down Choose   ·   Enter Select   ·   Esc Cancel",
+                markup=False,
             )
         elif step == "file":
             yield Static("Path to the reference audio file (~10-20s, clean, single speaker)")
             yield Input(id="clone-file", placeholder="/path/to/reference.wav")
-            yield Static(self._flow_error or "Enter Continue   ·   Esc Cancel")
+            yield Static(
+                self._flow_error or "Enter Continue   ·   Esc Cancel", markup=False
+            )
         elif step == "youtube":
             yield Static("YouTube URL — a segment is cut automatically, then reviewed")
             yield Input(id="clone-url", placeholder="https://youtu.be/…")
-            yield Static(self._flow_error or "Enter Download   ·   Esc Cancel")
+            yield Static(
+                self._flow_error or "Enter Download   ·   Esc Cancel", markup=False
+            )
         elif step == "busy":
             yield Static(self._busy_message, id="clone-busy")
             yield Static("Esc Cancel")
@@ -430,13 +523,15 @@ class CloneScreen(Screen[bool]):
                 yield Static(
                     f"{label}: {start:.1f}–{end:.1f}s — {self.selection.reason}",
                     id="clone-selection-provenance",
+                    markup=False,
                 )
                 if self.selection.transcript:
                     yield Static(
                         f"Transcript: {self.selection.transcript}",
                         id="clone-selection-transcript",
+                        markup=False,
                     )
-            yield Static(str(self.reference_path))
+            yield Static(str(self.reference_path), markup=False)
             yield OptionList(
                 "Audition reference clip",
                 "Confirm clip and create voice",
@@ -446,6 +541,7 @@ class CloneScreen(Screen[bool]):
             yield Static(
                 "Audition is mandatory before confirmation.",
                 id="clone-review-status",
+                markup=False,
             )
             yield Static("Up/Down Choose   ·   Enter Select   ·   Esc Cancel")
 
@@ -472,6 +568,11 @@ class CloneScreen(Screen[bool]):
 
     def _fail_back(self, step: str, message: str) -> None:
         self._flow_error = message
+        if step == self._step:
+            statics = list(self.query(Static))
+            if statics:
+                statics[-1].update(message)
+            return
         self._show_step(step)
 
     # ── acquisition ──────────────────────────────────────────────────────────
@@ -500,6 +601,11 @@ class CloneScreen(Screen[bool]):
         elif event.input.id == "clone-url":
             if not value:
                 self._fail_back("youtube", "Enter a URL.")
+                return
+            try:
+                validate_youtube_url(value)
+            except RuntimeError as exc:
+                self._fail_back("youtube", str(exc))
                 return
             self._flow_error = ""
             self._busy_message = "Downloading, transcribing, and selecting a reference segment…"

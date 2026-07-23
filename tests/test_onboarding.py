@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -453,6 +454,45 @@ class AuditionTests(_ScreenHarness):
             [(_SAMPLE_TEXT, None), (_SAMPLE_TEXT, BUNDLED_VOICES[0].name)],
         )
 
+    async def test_second_audition_is_ignored_while_one_is_in_flight(self) -> None:
+        from talktomeclaude.onboarding import OnboardingScreen
+
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[tuple[str, str | None]] = []
+
+        def helper(text: str, name: str | None) -> None:
+            calls.append((text, name))
+            started.set()
+            release.wait(5)
+
+        screen = OnboardingScreen(audition=helper)
+        app, _result = self._host(screen)
+        try:
+            with mock.patch(
+                "talktomeclaude.advisor.recommend", return_value=_recommendation(False)
+            ):
+                async with app.run_test() as pilot:
+                    await pilot.pause()
+                    await pilot.press("down", "enter", "enter", "s", "enter")
+                    await pilot.pause()
+                    self.assertEqual(screen._step, "voice")
+                    await pilot.press("p")  # first audition begins and blocks
+                    for _ in range(50):
+                        if started.is_set():
+                            break
+                        await pilot.pause()
+                    self.assertTrue(started.is_set())
+                    self.assertTrue(screen._auditioning)
+                    await pilot.press("p")  # the busy guard must ignore this one
+                    await pilot.pause()
+                    self.assertEqual(len(calls), 1)
+                    release.set()
+                    await app.workers.wait_for_complete()
+        finally:
+            release.set()
+        self.assertEqual(len(calls), 1)
+
     async def test_p_is_inert_off_the_voice_pane(self) -> None:
         from talktomeclaude.onboarding import OnboardingScreen
 
@@ -533,7 +573,7 @@ class CloneFromOnboardingTests(_ScreenHarness):
                 self.assertEqual(screen._step, "spoken")
         self.assertEqual(config.default_voice_name(), "my-clone")
 
-    async def test_cancelled_clone_falls_back_to_auto(self) -> None:
+    async def test_cancelled_clone_preserves_the_prior_default(self) -> None:
         from talktomeclaude.onboarding import OnboardingScreen
 
         config.set_default_voice("rick")
@@ -546,8 +586,10 @@ class CloneFromOnboardingTests(_ScreenHarness):
                 await self._to_clone_screen(pilot, screen)
                 await app.screen.dismiss(False)
                 await pilot.pause()
-                self.assertEqual(screen._step, "spoken")
-        self.assertIsNone(config.default_voice_name())
+                # Cancelling never advances past the voice pane...
+                self.assertEqual(screen._step, "voice")
+        # ...and never clears the operator's existing default voice.
+        self.assertEqual(config.default_voice_name(), "rick")
 
 
 if __name__ == "__main__":

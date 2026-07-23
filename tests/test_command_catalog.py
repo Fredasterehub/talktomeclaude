@@ -50,6 +50,47 @@ class ParseInitEventTests(unittest.TestCase):
     def test_empty_event_yields_no_records(self) -> None:
         self.assertEqual(cc.parse_init_event({}), [])
 
+    def test_duplicate_qualified_ids_dedupe_to_one_record(self) -> None:
+        event = {
+            "type": "system",
+            "subtype": "init",
+            "slash_commands": ["kiln-fire", "kiln-fire"],
+            "skills": [
+                {"name": "deploy", "namespace": "web"},
+                {"name": "deploy", "namespace": "web"},
+            ],
+        }
+        records = cc.parse_init_event(event)
+        ids = [cc.qualified_id(record) for record in records]
+        self.assertEqual(ids.count("kiln-fire"), 1)
+        self.assertEqual(ids.count("web:deploy"), 1)
+        self.assertEqual(len(records), 2)
+
+    def test_arg_schema_is_preserved_and_required_slots_extracted(self) -> None:
+        event = {
+            "skills": [
+                {
+                    "name": "commit",
+                    "namespace": "git",
+                    "arg_schema": [
+                        {"name": "message", "required": True},
+                        {"name": "scope", "required": False},
+                    ],
+                }
+            ]
+        }
+        record = cc.parse_init_event(event)[0]
+        self.assertEqual(
+            record["arg_schema"],
+            [{"name": "message", "required": True}, {"name": "scope", "required": False}],
+        )
+        self.assertEqual(cc.required_slots(record), ["message"])
+
+    def test_absent_arg_schema_yields_no_required_slots(self) -> None:
+        record = cc.parse_init_event({"slash_commands": ["kiln-fire"]})[0]
+        self.assertIsNone(record["arg_schema"])
+        self.assertEqual(cc.required_slots(record), [])
+
 
 class MergeWithSavedTests(unittest.TestCase):
     def test_refreshes_description_and_preserves_user_flags(self) -> None:
@@ -136,6 +177,34 @@ class QualifiedIdentityTests(unittest.TestCase):
         self.assertEqual(merged["web:deploy"]["fire_count"], 7)
         self.assertEqual(merged["api:deploy"]["fire_count"], 0)
 
+    def test_legacy_bare_key_never_lands_on_a_top_level_collision(self) -> None:
+        # A legacy bare 'deploy' key is ambiguous when a top-level 'deploy' AND
+        # a 'web:deploy' both exist, so it must not leak onto the top-level one.
+        saved = {"deploy": {"enabled": False, "fire_count": 8}}
+        merged = {
+            cc.qualified_id(record): record
+            for record in cc.merge_with_saved(
+                [_record("deploy", ""), _record("deploy", "web")], saved
+            )
+        }
+        self.assertIs(merged["deploy"]["enabled"], True)
+        self.assertEqual(merged["deploy"]["fire_count"], 0)
+        self.assertEqual(merged["web:deploy"]["fire_count"], 0)
+
+    def test_canonical_top_level_key_survives_a_namespace_collision(self) -> None:
+        # The unambiguous ':deploy' persist key still applies to the top-level
+        # command even when a namespaced deploy shares its id.
+        saved = {":deploy": {"enabled": False, "fire_count": 5}}
+        merged = {
+            cc.qualified_id(record): record
+            for record in cc.merge_with_saved(
+                [_record("deploy", ""), _record("deploy", "web")], saved
+            )
+        }
+        self.assertIs(merged["deploy"]["enabled"], False)
+        self.assertEqual(merged["deploy"]["fire_count"], 5)
+        self.assertEqual(merged["web:deploy"]["fire_count"], 0)
+
 
 class SaveFlagsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -150,7 +219,9 @@ class SaveFlagsTests(unittest.TestCase):
     def test_flags_persist_under_qualified_keys(self) -> None:
         cc.save_flags([_record("kiln-fire", "kiln", fire_count=2), _record("mytool", "")])
         saved = cc.load_saved_flags()
-        self.assertEqual(set(saved), {"kiln:kiln-fire", "mytool"})
+        # Top-level commands persist under an unambiguous ``:id`` key so a legacy
+        # bare ``id`` key can never be mistaken for a canonical top-level entry.
+        self.assertEqual(set(saved), {"kiln:kiln-fire", ":mytool"})
         self.assertEqual(saved["kiln:kiln-fire"]["fire_count"], 2)
 
     def test_legacy_bare_file_migrates_to_qualified_on_next_save(self) -> None:

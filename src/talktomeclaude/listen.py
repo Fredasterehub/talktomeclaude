@@ -141,6 +141,17 @@ def _allowed_records(catalog: list[dict]) -> tuple[list[dict], list[dict]]:
     return allowed, blocked
 
 
+def _is_fireable(record: dict) -> bool:
+    """Whether a catalog record may be voice-fired: enabled and permitted by the
+    active namespace policy."""
+    if not record.get("enabled", True):
+        return False
+    if _setting(config.command_namespace_policy, "allow-all") == "allowlist":
+        allowlist = _setting(config.command_namespace_allowlist, ())
+        return (record.get("namespace") or "") in allowlist
+    return True
+
+
 def _command_request(utterance: str) -> str:
     lowered = utterance.strip().casefold()
     for trigger in _COMMAND_TRIGGERS:
@@ -163,7 +174,16 @@ def _match_name(utterance: str, records: list[dict]) -> "IntentOutcome | None":
     if not matches:
         return None
     if len(matches) == 1:
-        return IntentOutcome("complete", record=matches[0], args=remainder)
+        record = matches[0]
+        if not remainder:
+            slots = command_catalog.required_slots(record)
+            if slots:
+                # Named exactly, but the advertised schema needs arguments the
+                # utterance did not supply — clarify instead of firing empty.
+                return IntentOutcome(
+                    "missing_slot", record=record, missing_slots=tuple(slots)
+                )
+        return IntentOutcome("complete", record=record, args=remainder)
     choices = tuple(
         command_catalog.qualified_id(match)
         for match in matches[: intent.MAX_SPOKEN_ALTERNATIVES]
@@ -268,42 +288,65 @@ def _classify_intent(
     return _NO_MATCH
 
 
+def _report_non_fireable(
+    matched: IntentOutcome, catalog: list[dict], status: Callable[[str], None]
+) -> None:
+    """Explain why an exactly-named command is not fireable — disabled, or
+    blocked by the namespace allowlist — before routing it to content."""
+    records = [matched.record] if matched.record is not None else []
+    if not records:
+        for alternative in matched.alternatives:
+            records.extend(_matching_records(catalog, alternative))
+    if records and all(not record.get("enabled", True) for record in records):
+        names = ", ".join(command_catalog.qualified_id(record) for record in records)
+        status(f"/{names} is disabled; treating the request as content")
+        return
+    namespace = next(
+        (record.get("namespace") for record in records if record.get("namespace")),
+        None,
+    ) or (matched.alternatives[0].split(":")[0] if matched.alternatives else "top-level")
+    status(
+        f"the {namespace} namespace is not allowed by the "
+        "command-namespace allowlist; treating the request as content"
+    )
+
+
 def _resolve_command(
     utterance: str, catalog: list[dict], status: Callable[[str], None]
 ) -> IntentOutcome:
     """Resolve a spoken utterance to a typed command outcome.
 
-    The deterministic keyword prefilter runs first (exact command names,
-    no model round-trip). Only an explicit command request ("command …",
+    Exact command identities resolve against the COMPLETE catalog first. An
+    utterance that exactly names a known-but-non-fireable command (disabled or
+    policy-blocked) stops as content immediately — it never reaches the
+    classifier, so it can never be remapped onto a different enabled mutating
+    command. Only a genuinely unmatched explicit command request ("command …",
     "run command …", "fire command …") escalates to the isolated intent
-    sub-call; ordinary content never does. Namespace policy is honored here:
-    a policy-blocked match is reported and treated as content.
+    sub-call, whose result _classify_intent validates back to a fireable record.
     """
-    allowed, blocked = _allowed_records(catalog)
-    if not allowed and not blocked:
+    allowed, _blocked = _allowed_records(catalog)
+    non_fireable = [record for record in catalog if not _is_fireable(record)]
+    if not allowed and not non_fireable:
         return _NO_MATCH
     request = _command_request(utterance)
     triggered = request != utterance.strip()
+    # Fast path: an exact deterministic match among the fireable commands.
     outcome = _match_name(utterance, allowed)
     if outcome is None and triggered and request:
         outcome = _match_name(request, allowed)
-        if outcome is None:
-            outcome = _classify_intent(request, allowed, status)
     if outcome is not None and outcome.kind != "no_match":
         return outcome
-    if blocked:
-        hit = _match_name(utterance, blocked) or (
-            _match_name(request, blocked) if triggered and request else None
-        )
-        if hit is not None:
-            record = hit.record or {}
-            namespace = record.get("namespace") or (
-                hit.alternatives[0].split(":")[0] if hit.alternatives else "top-level"
-            )
-            status(
-                f"the {namespace} namespace is not allowed by the "
-                "command-namespace allowlist; treating the request as content"
-            )
+    # An exact identity naming a disabled/blocked command is content — resolved
+    # here, ahead of any classifier call that could remap it.
+    named = _match_name(utterance, non_fireable)
+    if named is None and triggered and request:
+        named = _match_name(request, non_fireable)
+    if named is not None and named.kind != "no_match":
+        _report_non_fireable(named, catalog, status)
+        return _NO_MATCH
+    # Genuinely unmatched: escalate an explicit command request to the classifier.
+    if triggered and request and allowed:
+        return _classify_intent(request, allowed, status)
     return _NO_MATCH
 
 
@@ -841,6 +884,7 @@ def _record_always_on(
     on_level: Callable[[float], None] | None = None,
     on_recording: Callable[[], None] | None = None,
     stop_event: "threading.Event | None" = None,
+    wake_check: "Callable[[], bool] | None" = None,
 ) -> "object | None":
     """Hands-free capture: calibrate the noise floor, trigger on speech
     energy, and end the utterance after a trailing pause.
@@ -848,6 +892,11 @@ def _record_always_on(
     A set *stop_event* aborts at the next audio block so an idle hands-free
     session — blocked on the microphone rather than on a key source — can still
     unwind promptly when the dashboard asks it to stop.
+
+    *wake_check* re-reads wake enablement roughly once a second during the
+    pre-trigger wait (while no speech is captured yet); when it reports wake
+    switched on, this ungated pass returns None so the next capture re-gates
+    through the wake detector instead of running an unbounded ungated window.
     """
     stopping = lambda: stop_event is not None and stop_event.is_set()
     sounddevice = _sounddevice()
@@ -855,6 +904,8 @@ def _record_always_on(
     preroll_blocks = max(1, int(_PREROLL_SECONDS / _BLOCK_SECONDS))
     hang_blocks = max(1, int(_SILENCE_HANG_SECONDS / _BLOCK_SECONDS))
     max_blocks = int(_MAX_UTTERANCE_SECONDS / _BLOCK_SECONDS)
+    wake_poll_blocks = max(1, int(1.0 / _BLOCK_SECONDS))
+    blocks_since_wake_poll = 0
     with sounddevice.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="float32", blocksize=blocksize
     ) as stream:
@@ -872,6 +923,12 @@ def _record_always_on(
         while True:
             if stopping():
                 return None
+            if not chunks and wake_check is not None:
+                blocks_since_wake_poll += 1
+                if blocks_since_wake_poll >= wake_poll_blocks:
+                    blocks_since_wake_poll = 0
+                    if wake_check():
+                        return None
             block, _overflowed = stream.read(blocksize)
             level = _rms(block)
             if chunks:
@@ -1320,6 +1377,12 @@ def run_listen(
         status("barge-in is on but no headphones were detected; staying half-duplex")
 
     catalog: list[dict] = []
+    # Bootstrap a usable roster from the persisted flags so the very first
+    # utterance can resolve; the first system/init event refreshes it below.
+    try:
+        catalog[:] = command_catalog.roster_from_saved()
+    except Exception:
+        pass
     pending_fire: "tuple[dict, str] | None" = None
     pending_namespace: "tuple[dict, str] | None" = None
     clarify: dict | None = None
@@ -1369,8 +1432,18 @@ def run_listen(
                         on_level=on_level,
                         on_recording=recording,
                     )
+            # An ungated pass re-reads wake enablement mid-wait: if the operator
+            # switches wake on, abort so the next capture re-gates on the phrase.
+            wake_check = (
+                (lambda: bool(_setting(config.wake_word_enabled, False)))
+                if disposition is WakeDisposition.OFF_UNGATED
+                else None
+            )
             return _record_always_on(
-                on_level=on_level, on_recording=recording, stop_event=stop_event
+                on_level=on_level,
+                on_recording=recording,
+                stop_event=stop_event,
+                wake_check=wake_check,
             )
         with keys:
             if mode == "push-to-talk":
@@ -1624,8 +1697,9 @@ def run_listen(
                 outcome, round_state["original"], round_state["request"], history, rounds
             )
             if handled is None:
-                if once and pending_fire is not None:
-                    return
+                # Under --once the session stays alive through confirmation,
+                # cancellation, and namespace approval; it exits only once the
+                # resulting fire or content turn actually completes below.
                 continue
             text = handled  # exhausted: the ORIGINAL utterance flows as content
         else:
@@ -1633,8 +1707,6 @@ def run_listen(
             if outcome.kind != "no_match":
                 handled = advance(outcome, text, _command_request(text), [], 0)
                 if handled is None:
-                    if once and pending_fire is not None:
-                        return
                     continue
                 text = handled
         set_phase("thinking")

@@ -262,6 +262,35 @@ class VoiceBridgeTests(_ConfigIsolation):
             self.assertNotEqual(app.wake_enabled, start)
             self.assertEqual(config.wake_word_enabled(), app.wake_enabled)
 
+    async def test_wake_toggle_stays_manual_after_a_mid_session_degradation(self) -> None:
+        from talktomeclaude import config
+
+        config.set_wake_word(True)
+        config.set_wake_model_path("/models/yo-claude.onnx")
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chip = app.query_one("#wake-chip", tui.Static)
+            self.assertEqual(chip.render().plain, "WAKE ON")
+            # A running session whose detector fails mid-session sticks to manual.
+            app._voice_running = True
+            app.post_message(
+                tui.Status(
+                    "wake word manual fallback: detector died; push-to-talk required"
+                )
+            )
+            await pilot.pause()
+            self.assertEqual(chip.render().plain, "WAKE MANUAL")
+            # Toggling wake off then on must not falsely reclaim readiness while
+            # the live session is still manual.
+            await pilot.press("w")  # off
+            await pilot.pause()
+            await pilot.press("w")  # on again, mid-session
+            await pilot.pause()
+            self.assertEqual(chip.render().plain, "WAKE MANUAL")
+            self.assertIn("manual", app.notice.lower())
+            app._voice_running = False
+
     async def test_escape_stops_a_running_session(self) -> None:
         def fake(**kwargs):
             kwargs["keys"].read_key(None)  # blocks until stop() raises

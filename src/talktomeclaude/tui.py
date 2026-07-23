@@ -577,6 +577,9 @@ class TalkToMeApp(App[None]):
         self._compact: bool | None = None
         self._thinking_started = 0.0
         self.current_session_id: str | None = None
+        # Sticky: a running session that fell back to manual wake can't recover
+        # for its lifetime, so re-enabling wake must not reclaim readiness.
+        self._wake_degraded_session = False
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return {**super().get_theme_variable_defaults(), **_TTMJ_VARS}
@@ -740,6 +743,7 @@ class TalkToMeApp(App[None]):
         if self._voice_running:
             return
         self._voice_running = True
+        self._wake_degraded_session = False
         self._keys = QueueKeys()
         self._stop_event = threading.Event()
         self.notice = "Starting a voice session…"
@@ -869,9 +873,11 @@ class TalkToMeApp(App[None]):
             if lowered.startswith("wake word manual fallback"):
                 self.wake_ready = False
                 self.wake_unavailable = False
+                self._wake_degraded_session = True
             elif "wake word" in lowered:
                 self.wake_ready = False
                 self.wake_unavailable = True
+                self._wake_degraded_session = True
             self.notice = text.removeprefix("error:").strip()
 
     def on_phase(self, message: Phase) -> None:
@@ -912,10 +918,18 @@ class TalkToMeApp(App[None]):
         self.wake_enabled = not self.wake_enabled
         config.set_wake_word(self.wake_enabled)
         self.wake_unavailable = False
-        self.wake_ready = config.wake_model_path() is not None
         if not self.wake_enabled:
+            self.wake_ready = config.wake_model_path() is not None
             self.notice = "Wake word off — hands-free capture starts immediately"
-        elif self.wake_ready:
+            return
+        if self._voice_running and self._wake_degraded_session:
+            # The live listen loop already fell back to manual for this session
+            # and cannot recover until it restarts — do not claim readiness now.
+            self.wake_ready = False
+            self.notice = "Wake word stays manual until the session restarts"
+            return
+        self.wake_ready = config.wake_model_path() is not None
+        if self.wake_ready:
             self.notice = "Wake word on — hands-free capture waits for the wake phrase"
         else:
             self.notice = (

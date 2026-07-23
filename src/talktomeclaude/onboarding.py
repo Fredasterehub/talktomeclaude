@@ -69,6 +69,7 @@ class OnboardingScreen(Screen[bool]):
         self._history: list[str] = []
         self._clone_feasible: bool | None = None
         self._audition = audition or _synth_and_play
+        self._auditioning = False
 
     # ── pane rendering ───────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -320,9 +321,22 @@ class OnboardingScreen(Screen[bool]):
         self._audition_async(_TEST_TEXT, config.default_voice_name())
 
     def _audition_async(self, text: str, voice_name: str | None) -> None:
+        # A real busy guard: Textual's exclusive worker only cancels its own
+        # wrapper, so without this a second audition could still overlap the
+        # first's synthesis/download/GPU/playback. Ignore it until this finishes.
+        if self._auditioning:
+            return
+        self._auditioning = True
         helper = self._audition
+
+        def run() -> None:
+            try:
+                helper(text, voice_name)
+            finally:
+                self._auditioning = False
+
         self.run_worker(
-            lambda: helper(text, voice_name),
+            run,
             group="audition",
             thread=True,
             exclusive=True,
@@ -370,10 +384,11 @@ class OnboardingScreen(Screen[bool]):
                 def _cloned(created: bool | None) -> None:
                     voice = clone.created_voice
                     if created and voice is not None:
+                        # Only a successful clone becomes the default and moves on.
                         config.set_default_voice(voice.name)
-                    else:
-                        config.set_default_voice(None)
-                    self._next()
+                        self._next()
+                    # Cancellation/failure: keep the prior default untouched and
+                    # remain on the voice pane so nothing is silently cleared.
 
                 self.app.push_screen(clone, _cloned)
             else:

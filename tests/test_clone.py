@@ -30,7 +30,11 @@ class CloneModelFreeTests(unittest.TestCase):
         self.assertEqual(command[0], "yt-dlp")
         self.assertIn("--extractor-args", command)
         self.assertIn("youtube:player_client=android_vr,web,tv", command)
-        self.assertEqual(command[-2:], ["agent-cut.m4a", "https://youtu.be/example"])
+        self.assertIn("--max-filesize", command)
+        self.assertEqual(
+            command[command.index("--max-filesize") + 1], clone._YTDLP_MAX_FILESIZE
+        )
+        self.assertEqual(command[-2:], ["--", "https://youtu.be/example"])
 
     def test_empty_text_raises_before_loading_the_model(self) -> None:
         with mock.patch.object(clone, "_load_model") as load:

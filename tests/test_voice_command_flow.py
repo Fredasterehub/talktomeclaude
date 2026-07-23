@@ -90,7 +90,7 @@ class VoiceCommandDispatchTests(_Isolated):
         self.assertEqual(prompts, ["hello", "/kiln-fire"])
         self.assertTrue(any("Firing /kiln-fire" in line for line in spoken))
         saved = command_catalog.load_saved_flags()
-        self.assertEqual(saved["kiln-fire"]["fire_count"], 1)
+        self.assertEqual(saved[":kiln-fire"]["fire_count"], 1)
 
     def test_cancel_drops_the_pending_command(self) -> None:
         # The catalog is discovered from the session's init event, so the
@@ -100,7 +100,7 @@ class VoiceCommandDispatchTests(_Isolated):
         self._run(["hello", "kiln-fire", "cancel"], prompts, spoken)
         self.assertEqual(prompts, ["hello"])
         saved = command_catalog.load_saved_flags()
-        self.assertEqual(saved["kiln-fire"]["fire_count"], 0)
+        self.assertEqual(saved[":kiln-fire"]["fire_count"], 0)
 
     def test_ordinary_content_never_resolves_without_a_catalog(self) -> None:
         prompts: list[str] = []
@@ -321,25 +321,111 @@ class NamespacePolicyTests(_LoopHarness):
         self.assertEqual(len(asks), 1)
         self.assertEqual(out.prompts, ["hello", "/kiln-fire", "/kiln-fire"])
         saved = command_catalog.load_saved_flags()
-        self.assertEqual(saved["kiln-fire"]["fire_count"], 2)
+        self.assertEqual(saved[":kiln-fire"]["fire_count"], 2)
 
     def test_ask_first_use_cancel_drops_the_fire(self) -> None:
         config.set_command_namespace_policy("ask-first-use")
         out = self.run_loop(["hello", "kiln-fire", "go", "cancel"])
         self.assertEqual(out.prompts, ["hello"])
         saved = command_catalog.load_saved_flags()
-        self.assertEqual(saved["kiln-fire"]["fire_count"], 0)
+        self.assertEqual(saved[":kiln-fire"]["fire_count"], 0)
 
 
 class OnceClarificationTests(_LoopHarness):
-    def test_once_session_survives_one_clarification_round_then_ends(self) -> None:
+    def test_once_fires_the_command_after_the_spoken_go(self) -> None:
+        # --once must keep the session alive through disambiguation AND the
+        # confirmation prompt, firing only once the spoken "go" is captured.
         records = command_catalog.parse_init_event(_INIT_EVENT)
         with mock.patch.object(listen, "_allowed_records", return_value=(records, [])):
-            out = self.run_loop(["deploy now", "web:deploy", "SENTINEL"], once=True)
+            out = self.run_loop(["deploy now", "web:deploy", "go"], once=True)
         self.assertTrue(any(line.startswith("Which command") for line in out.spoken))
         self.assertTrue(any("Firing /web:deploy now" in line for line in out.spoken))
-        self.assertEqual(out.prompts, [])
-        self.assertEqual(out.leftover, ["SENTINEL"])
+        self.assertEqual(out.prompts, ["/web:deploy now"])
+        self.assertEqual(out.leftover, [])
+
+
+def _catalog_record(command_id, namespace, *, enabled=True, mutating=True, arg_schema=None):
+    return {
+        "id": command_id,
+        "namespace": namespace,
+        "description": "",
+        "mutating": mutating,
+        "enabled": enabled,
+        "favorite": False,
+        "fire_count": 0,
+        "arg_schema": arg_schema,
+    }
+
+
+class DispatcherSecurityTests(_Isolated):
+    def test_disabled_command_is_content_and_never_reaches_the_classifier(self) -> None:
+        # A disabled command's exact name must resolve against the COMPLETE
+        # catalog first and stop as content, so it can never be remapped by the
+        # classifier onto a different enabled mutating command.
+        catalog = [
+            _catalog_record("deploy", "", enabled=False),
+            _catalog_record("release", "", enabled=True),
+        ]
+        statuses: list[str] = []
+        with mock.patch.object(
+            listen,
+            "_classify_intent",
+            side_effect=AssertionError("must not classify a disabled command"),
+        ):
+            outcome = listen._resolve_command(
+                "command deploy", catalog, statuses.append
+            )
+        self.assertEqual(outcome.kind, "no_match")
+        self.assertTrue(any("disabled" in line for line in statuses))
+
+    def test_required_arg_command_emits_missing_slot_on_empty_remainder(self) -> None:
+        records = [
+            _catalog_record(
+                "commit", "git", arg_schema=[{"name": "message", "required": True}]
+            )
+        ]
+        outcome = listen._match_name("git:commit", records)
+        self.assertEqual(outcome.kind, "missing_slot")
+        self.assertEqual(outcome.missing_slots, ("message",))
+
+    def test_no_arg_command_still_fires_on_empty_remainder(self) -> None:
+        records = [_catalog_record("kiln-fire", "")]
+        outcome = listen._match_name("kiln-fire", records)
+        self.assertEqual(outcome.kind, "complete")
+        self.assertEqual(outcome.args, "")
+
+
+class CatalogBootstrapTests(_LoopHarness):
+    def test_command_resolves_on_the_first_utterance_from_persisted_roster(self) -> None:
+        # With catalog metadata persisted before the session, the very first
+        # utterance resolves — no ordinary turn is needed to seed the roster.
+        command_catalog.save_flags([_catalog_record("kiln-fire", "")])
+        out = self.run_loop(["kiln-fire", "go"])
+        self.assertEqual(out.prompts, ["/kiln-fire"])
+        self.assertTrue(any("Firing /kiln-fire" in line for line in out.spoken))
+
+
+class MidWaitWakeTests(unittest.TestCase):
+    def test_enabling_wake_mid_wait_aborts_the_ungated_capture(self) -> None:
+        block = mock.Mock()
+        block.copy.return_value = block
+        stream = mock.MagicMock()
+        stream.__enter__.return_value.read.return_value = (block, False)
+        sounddevice = mock.Mock()
+        sounddevice.InputStream.return_value = stream
+        polled = {"n": 0}
+
+        def wake_check() -> bool:
+            polled["n"] += 1
+            return True  # the operator switched wake on mid-wait
+
+        with mock.patch.object(listen, "_sounddevice", return_value=sounddevice), \
+                mock.patch.object(listen, "_rms", return_value=0.0), \
+                mock.patch.object(listen, "_finish", side_effect=lambda c, *a: c or None):
+            result = listen._record_always_on(wake_check=wake_check)
+
+        self.assertIsNone(result)  # aborted so the next capture re-gates
+        self.assertGreaterEqual(polled["n"], 1)
 
 
 class WakeGateTests(_Isolated):
