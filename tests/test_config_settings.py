@@ -62,6 +62,47 @@ class ConfigSettingsTests(unittest.TestCase):
         config.set_wake_phrase("yo claude")
         self.assertEqual(config.wake_phrase(), "yo claude")
 
+    def test_stt_device_defaults_auto_guards_and_round_trips(self) -> None:
+        self.assertEqual(config.stt_device(), "auto")
+        config.set_stt_device("cuda")
+        self.assertEqual(config.stt_device(), "cuda")
+        config.set_stt_device("cpu")
+        self.assertEqual(config.stt_device(), "cpu")
+        with self.assertRaises(ValueError):
+            config.set_stt_device("tpu")
+        self.assertEqual(config.stt_device(), "cpu")  # rejected write changed nothing
+
+    def test_stt_device_ignores_a_corrupt_stored_value(self) -> None:
+        config.set_value("stt-device", "quantum")
+        self.assertEqual(config.stt_device(), "auto")
+
+    def test_command_namespace_policy_defaults_guards_and_round_trips(self) -> None:
+        self.assertEqual(config.command_namespace_policy(), "allow-all")
+        config.set_command_namespace_policy("ask-first-use")
+        self.assertEqual(config.command_namespace_policy(), "ask-first-use")
+        config.set_command_namespace_policy("allowlist")
+        self.assertEqual(config.command_namespace_policy(), "allowlist")
+        with self.assertRaises(ValueError):
+            config.set_command_namespace_policy("deny-all")
+        self.assertEqual(config.command_namespace_policy(), "allowlist")
+
+    def test_command_namespace_allowlist_parses_trims_and_clears(self) -> None:
+        self.assertEqual(config.command_namespace_allowlist(), ())
+        config.set_command_namespace_allowlist(" kiln , gsd ,, ")
+        self.assertEqual(config.command_namespace_allowlist(), ("kiln", "gsd"))
+        config.set_command_namespace_allowlist(None)
+        self.assertEqual(config.command_namespace_allowlist(), ())
+        config.set_command_namespace_allowlist("solo")
+        config.set_command_namespace_allowlist("")  # empty clears
+        self.assertEqual(config.command_namespace_allowlist(), ())
+
+    def test_clone_recipe_choice_defaults_later_and_guards(self) -> None:
+        self.assertEqual(config.clone_recipe_choice(), "later")
+        config.set_clone_recipe_choice("shown")
+        self.assertEqual(config.clone_recipe_choice(), "shown")
+        with self.assertRaises(ValueError):
+            config.set_clone_recipe_choice("maybe")
+
     def test_assist_state_written_outside_is_read_inside_the_plugin_env(self) -> None:
         # LAW assist-mute: `assist off` from a normal shell must be the exact
         # state the Stop hook reads while Claude Code sets CLAUDE_PLUGIN_DATA.

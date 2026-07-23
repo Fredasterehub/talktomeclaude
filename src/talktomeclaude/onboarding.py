@@ -18,21 +18,36 @@ from textual.widgets import Input, OptionList, Static
 
 from talktomeclaude import config
 
-CURRENT_ONBOARDING_VERSION: int = 1
+CURRENT_ONBOARDING_VERSION: int = 2
 
 _STEP_ORDER = (
     "welcome",
     "hardware",
+    "stt-tier",
+    "clone-recipe",
     "claude",
     "voice",
     "spoken",
     "recording",
     "wake",
+    "namespaces",
     "permissions",
     "finish",
 )
 
 _HINT = "Enter Select   ·   S Skip   ·   B Back   ·   Esc Use defaults and finish"
+_HINT_EXTRA = {
+    "voice": "P Play sample   ·   ",
+    "finish": "T Test the voice   ·   ",
+}
+_SAMPLE_TEXT = "Hi. This is how I sound."
+_TEST_TEXT = "Talk to me, Claude. The voice link is live."
+
+
+def _synth_and_play(text: str, voice_name: str | None) -> None:
+    from talktomeclaude import tts
+
+    tts.synthesize_and_play(text, voice_name)
 
 
 class OnboardingScreen(Screen[bool]):
@@ -41,14 +56,19 @@ class OnboardingScreen(Screen[bool]):
     BINDINGS = [
         Binding("s", "skip", "Skip", show=False),
         Binding("b", "back", "Back", show=False),
+        Binding("p", "play_sample", "Play sample", show=False),
+        Binding("t", "test_voice", "Test voice", show=False),
         Binding("escape", "accept_defaults", "Use defaults", show=False, priority=True),
     ]
 
-    def __init__(self) -> None:
+    def __init__(
+        self, audition: Callable[[str, str | None], None] | None = None
+    ) -> None:
         super().__init__()
         self._step = "welcome"
         self._history: list[str] = []
         self._clone_feasible: bool | None = None
+        self._audition = audition or _synth_and_play
 
     # ── pane rendering ───────────────────────────────────────────────────────
     def compose(self) -> ComposeResult:
@@ -70,6 +90,25 @@ class OnboardingScreen(Screen[bool]):
             yield Static("Your hardware")
             yield Static(self._hardware_summary())
             yield OptionList("Continue", id="ob-hardware")
+        elif step == "stt-tier":
+            yield Static("Speech-to-text device")
+            yield OptionList(
+                "Auto (recommended)",
+                "CUDA (GPU)",
+                "CPU",
+                id="ob-stt-tier",
+            )
+        elif step == "clone-recipe":
+            yield Static("Voice cloning is feasible here — the install recipe is ready")
+            yield OptionList(
+                "Show the install recipe now",
+                "Later (`talktomeclaude doctor` prints it any time)",
+                id="ob-clone-recipe",
+            )
+        elif step == "clone-recipe-text":
+            yield Static("Install the cloning engine (into this environment):")
+            yield Static(self._recipe_text(), id="ob-recipe-text")
+            yield OptionList("Continue", id="ob-clone-recipe-text")
         elif step == "claude":
             yield Static("Where does Claude Code run?")
             yield OptionList(
@@ -116,6 +155,23 @@ class OnboardingScreen(Screen[bool]):
                 value=config.wake_phrase(),
                 placeholder=config.DEFAULT_WAKE_PHRASE,
             )
+        elif step == "namespaces":
+            yield Static(
+                "Voice-command namespaces (policy only — enforced once a session exists)"
+            )
+            yield OptionList(
+                "Allow all namespaces (default)",
+                "Ask on first use",
+                "Only an allowlist…",
+                id="ob-namespaces",
+            )
+        elif step == "namespaces-allowlist":
+            yield Static("Allowed namespaces (comma-separated)")
+            yield Input(
+                id="ob-namespaces-allowlist",
+                value=", ".join(config.command_namespace_allowlist()),
+                placeholder="kiln, gsd",
+            )
         elif step == "permissions":
             yield Static("Claude permission posture (off is the safe default)")
             yield OptionList(*config.CLAUDE_PERMISSIONS, id="ob-permissions")
@@ -126,7 +182,7 @@ class OnboardingScreen(Screen[bool]):
                 "`talktomeclaude setup`."
             )
             yield OptionList("Finish", id="ob-finish")
-        yield Static(_HINT)
+        yield Static(_HINT_EXTRA.get(step, "") + _HINT)
 
     def _hardware_summary(self) -> str:
         try:
@@ -153,6 +209,15 @@ class OnboardingScreen(Screen[bool]):
                 self._clone_feasible = False
         return self._clone_feasible
 
+    def _recipe_text(self) -> str:
+        try:
+            from talktomeclaude import advisor
+
+            recipe = advisor.clone_install_recipe()
+        except Exception:
+            return "Run `talktomeclaude doctor` for the install recipe."
+        return "\n".join(f"$ {command}" for command in recipe)
+
     def on_mount(self) -> None:
         self._focus_step()
 
@@ -172,6 +237,12 @@ class OnboardingScreen(Screen[bool]):
             return config.RECORDING_MODES.index(config.DEFAULT_RECORDING_MODE)
         if pane.id == "ob-permissions":
             return config.CLAUDE_PERMISSIONS.index(config.claude_permissions())
+        if pane.id == "ob-stt-tier":
+            return config.STT_DEVICES.index(config.stt_device())
+        if pane.id == "ob-namespaces":
+            return config.COMMAND_NAMESPACE_POLICIES.index(
+                config.command_namespace_policy()
+            )
         return 0
 
     # ── navigation ───────────────────────────────────────────────────────────
@@ -185,7 +256,10 @@ class OnboardingScreen(Screen[bool]):
     def _next(self) -> None:
         order = list(_STEP_ORDER)
         index = order.index(self._step) if self._step in order else 0
-        self._goto(order[min(index + 1, len(order) - 1)])
+        index = min(index + 1, len(order) - 1)
+        if order[index] == "clone-recipe" and not self._clone_ok():
+            index = min(index + 1, len(order) - 1)
+        self._goto(order[index])
 
     def action_skip(self) -> None:
         if self._step == "finish":
@@ -194,7 +268,13 @@ class OnboardingScreen(Screen[bool]):
         if self._step in ("remote-target", "remote-cwd"):
             self._goto("voice")
             return
+        if self._step == "clone-recipe-text":
+            self._goto("claude")
+            return
         if self._step == "wake-phrase":
+            self._goto("namespaces")
+            return
+        if self._step == "namespaces-allowlist":
             self._goto("permissions")
             return
         self._next()
@@ -221,6 +301,34 @@ class OnboardingScreen(Screen[bool]):
         )
         self.dismiss(True)
 
+    # ── audition (always off the UI thread: synthesis may download a voice) ──
+    def action_play_sample(self) -> None:
+        if self._step != "voice":
+            return
+        pane = self.query(OptionList).first(OptionList)
+        if pane.highlighted is None:
+            return
+        label = str(pane.get_option_at_index(pane.highlighted).prompt)
+        if label == "Clone your own voice…":
+            return
+        name = None if label == "Auto (recommended)" else label
+        self._audition_async(_SAMPLE_TEXT, name)
+
+    def action_test_voice(self) -> None:
+        if self._step != "finish":
+            return
+        self._audition_async(_TEST_TEXT, config.default_voice_name())
+
+    def _audition_async(self, text: str, voice_name: str | None) -> None:
+        helper = self._audition
+        self.run_worker(
+            lambda: helper(text, voice_name),
+            group="audition",
+            thread=True,
+            exclusive=True,
+            exit_on_error=False,
+        )
+
     # ── choices (each persisted the moment it is made) ───────────────────────
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         pane = event.option_list.id
@@ -232,6 +340,17 @@ class OnboardingScreen(Screen[bool]):
                 self._next()
         elif pane == "ob-hardware":
             self._next()
+        elif pane == "ob-stt-tier":
+            config.set_stt_device(config.STT_DEVICES[index])
+            self._next()
+        elif pane == "ob-clone-recipe":
+            config.set_clone_recipe_choice("shown" if index == 0 else "later")
+            if index == 0:
+                self._goto("clone-recipe-text")
+            else:
+                self._next()
+        elif pane == "ob-clone-recipe-text":
+            self._goto("claude")
         elif pane == "ob-claude":
             if index == 0:
                 config.set_remote(None)
@@ -246,8 +365,17 @@ class OnboardingScreen(Screen[bool]):
             elif label == "Clone your own voice…":
                 from talktomeclaude.clone_ui import CloneScreen
 
-                self.app.push_screen(CloneScreen(), lambda _created: None)
-                self._next()
+                clone = CloneScreen()
+
+                def _cloned(created: bool | None) -> None:
+                    voice = clone.created_voice
+                    if created and voice is not None:
+                        config.set_default_voice(voice.name)
+                    else:
+                        config.set_default_voice(None)
+                    self._next()
+
+                self.app.push_screen(clone, _cloned)
             else:
                 config.set_default_voice(label)
                 self._next()
@@ -261,6 +389,12 @@ class OnboardingScreen(Screen[bool]):
             config.set_wake_word(index == 1)
             if index == 1:
                 self._goto("wake-phrase")
+            else:
+                self._next()
+        elif pane == "ob-namespaces":
+            config.set_command_namespace_policy(config.COMMAND_NAMESPACE_POLICIES[index])
+            if config.COMMAND_NAMESPACE_POLICIES[index] == "allowlist":
+                self._goto("namespaces-allowlist")
             else:
                 self._next()
         elif pane == "ob-permissions":
@@ -279,6 +413,9 @@ class OnboardingScreen(Screen[bool]):
             self._goto("voice")
         elif event.input.id == "ob-wake-phrase":
             config.set_wake_phrase(value or config.DEFAULT_WAKE_PHRASE)
+            self._goto("namespaces")
+        elif event.input.id == "ob-namespaces-allowlist":
+            config.set_command_namespace_allowlist(value or None)
             self._goto("permissions")
 
 

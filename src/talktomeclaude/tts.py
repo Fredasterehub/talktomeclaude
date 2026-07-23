@@ -278,3 +278,41 @@ def synthesize(
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise TTSError(f"piper produced no audio at {out_path}")
     return voice
+
+
+def play_wav(path: Path) -> None:
+    """Play a WAV file through the default output device, blocking."""
+    import wave
+
+    try:
+        import numpy
+        import sounddevice
+    except (ImportError, OSError) as exc:
+        raise TTSError(f"audio playback unavailable ({exc})") from exc
+    with wave.open(str(path), "rb") as handle:
+        frames = handle.readframes(handle.getnframes())
+        samples = numpy.frombuffer(frames, dtype=numpy.int16)
+        channels = handle.getnchannels()
+        if channels > 1:
+            samples = samples.reshape(-1, channels)
+        sounddevice.play(samples, samplerate=handle.getframerate(), blocking=True)
+
+
+def synthesize_and_play(
+    text: str,
+    voice_name: str | None = None,
+    on_status=None,
+) -> Voice:
+    """Render *text* and play it immediately; the audition path onboarding and
+    the dashboard share. Blocking — callers run it off the UI thread."""
+    import tempfile
+
+    handle, raw_path = tempfile.mkstemp(prefix="talktomeclaude-audition-", suffix=".wav")
+    os.close(handle)
+    out_path = Path(raw_path)
+    try:
+        voice = synthesize(text, out_path, voice_name, on_status)
+        play_wav(out_path)
+        return voice
+    finally:
+        out_path.unlink(missing_ok=True)

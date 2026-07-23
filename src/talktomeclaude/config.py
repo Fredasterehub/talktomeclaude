@@ -18,6 +18,9 @@ RECORDING_MODES = ("always-on", "push-to-talk", "push-toggle")
 DEFAULT_RECORDING_MODE = "push-to-talk"
 DEFAULT_WAKE_PHRASE = "yo claude"
 CLAUDE_PERMISSIONS = ("off", "skip", "acceptEdits", "bypassPermissions")
+STT_DEVICES = ("auto", "cuda", "cpu")
+COMMAND_NAMESPACE_POLICIES = ("allow-all", "ask-first-use", "allowlist")
+CLONE_RECIPE_CHOICES = ("shown", "later")
 
 
 def config_dir() -> Path:
@@ -73,6 +76,72 @@ def set_recording_mode(mode: str) -> None:
             f"unknown recording mode {mode!r}: expected one of {', '.join(RECORDING_MODES)}"
         )
     set_value("recording-mode", mode)
+
+
+def stt_device() -> str:
+    """The persisted speech-to-text device tier; auto-detect is the default."""
+    value = load().get("stt-device")
+    return value if value in STT_DEVICES else "auto"
+
+
+def set_stt_device(value: str) -> None:
+    if value not in STT_DEVICES:
+        raise ValueError(
+            f"unknown stt device {value!r}: expected one of {', '.join(STT_DEVICES)}"
+        )
+    set_value("stt-device", value)
+
+
+def command_namespace_policy() -> str:
+    """The persisted command-namespace allowlist policy; allow-all is the
+    default. Enforcement lands with the live command catalog — the policy is
+    the contract persisted ahead of it."""
+    value = load().get("command-namespace-policy")
+    return value if value in COMMAND_NAMESPACE_POLICIES else "allow-all"
+
+
+def set_command_namespace_policy(value: str) -> None:
+    if value not in COMMAND_NAMESPACE_POLICIES:
+        raise ValueError(
+            f"unknown command-namespace policy {value!r}: expected one of "
+            f"{', '.join(COMMAND_NAMESPACE_POLICIES)}"
+        )
+    set_value("command-namespace-policy", value)
+
+
+def command_namespace_allowlist() -> tuple[str, ...]:
+    """The allowed command namespaces, parsed from the persisted
+    comma-separated string; empty when unset."""
+    value = load().get("command-namespace-allowlist")
+    if not isinstance(value, str):
+        return ()
+    return tuple(part.strip() for part in value.split(",") if part.strip())
+
+
+def set_command_namespace_allowlist(value: str | None) -> None:
+    """Persist the comma-separated allowlist, or clear it when empty."""
+    if value and value.strip():
+        set_value("command-namespace-allowlist", value.strip())
+    else:
+        settings = load()
+        settings.pop("command-namespace-allowlist", None)
+        save(settings)
+
+
+def clone_recipe_choice() -> str:
+    """Whether the operator asked to see the clone install recipe during
+    onboarding; later is the default."""
+    value = load().get("clone-recipe")
+    return value if value in CLONE_RECIPE_CHOICES else "later"
+
+
+def set_clone_recipe_choice(value: str) -> None:
+    if value not in CLONE_RECIPE_CHOICES:
+        raise ValueError(
+            f"unknown clone-recipe choice {value!r}: expected one of "
+            f"{', '.join(CLONE_RECIPE_CHOICES)}"
+        )
+    set_value("clone-recipe", value)
 
 
 def onboarding_version() -> int:

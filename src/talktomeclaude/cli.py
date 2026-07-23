@@ -89,22 +89,12 @@ def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
 
 
 def _play_wav(path: Path) -> None:
-    import wave
+    from talktomeclaude.tts import play_wav
 
     try:
-        import numpy
-        import sounddevice
-    except (ImportError, OSError) as exc:
-        raise click.ClickException(
-            f"audio playback unavailable ({exc}); use --out to write a WAV file"
-        ) from exc
-    with wave.open(str(path), "rb") as wav:
-        frames = wav.readframes(wav.getnframes())
-        samples = numpy.frombuffer(frames, dtype=numpy.int16)
-        channels = wav.getnchannels()
-        if channels > 1:
-            samples = samples.reshape(-1, channels)
-        sounddevice.play(samples, samplerate=wav.getframerate(), blocking=True)
+        play_wav(path)
+    except TTSError as exc:
+        raise click.ClickException(f"{exc}; use --out to write a WAV file") from exc
 
 
 def _temporary_wav_path(prefix: str) -> Path:
@@ -356,9 +346,9 @@ def voice_create(
 @click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
-    default="auto",
-    show_default=True,
-    help="Hardware tier: auto-detect picks the GPU tier when CUDA is present.",
+    default=None,
+    help="Hardware tier for this run; defaults to the persisted stt-device setting "
+    "(auto-detect picks the GPU tier when CUDA is present).",
 )
 @click.option(
     "--model",
@@ -377,14 +367,17 @@ def voice_create(
     is_flag=True,
     help="Report the active tier and any degradation on stderr.",
 )
-def transcribe(audio: Path, device: str, model_name: str | None, show_tier: bool, verbose: bool) -> None:
+def transcribe(audio: Path, device: str | None, model_name: str | None, show_tier: bool, verbose: bool) -> None:
     """Transcribe an AUDIO file locally with Whisper-class speech-to-text.
 
     Auto-detects the hardware tier: a CUDA GPU carries the largest fluid
     model; CPU-only machines use the most accurate model that stays fluid.
     Tier fallbacks are always reported on stderr — never silent.
     """
+    from talktomeclaude import config as settings
     from talktomeclaude.stt import STTError, detect_tier, transcribe_file
+
+    device = device or settings.stt_device()
 
     if show_tier:
         try:
@@ -452,9 +445,8 @@ def filter_command(transcript) -> None:
 @click.option(
     "--device",
     type=click.Choice(["auto", "cuda", "cpu"]),
-    default="auto",
-    show_default=True,
-    help="Hardware tier: auto-detect picks the GPU tier when CUDA is present.",
+    default=None,
+    help="Hardware tier for this run; defaults to the persisted stt-device setting.",
 )
 @click.option(
     "--model",
@@ -476,7 +468,7 @@ def listen(
     tmux_pane: str | None,
     remote: str | None,
     remote_cwd: str | None,
-    device: str,
+    device: str | None,
     model_name: str | None,
     permission: str | None,
     once: bool,
@@ -504,6 +496,7 @@ def listen(
     from talktomeclaude.listen import ListenError, run_listen
 
     active_mode = mode or config.recording_mode()
+    active_device = device or config.stt_device()
     active_permission = permission or config.claude_permissions()
     active_remote = remote or config.remote()
     if remote_cwd is not None and not active_remote:
@@ -517,7 +510,7 @@ def listen(
             mode=active_mode,
             session_id=session_id,
             tmux_pane=tmux_pane,
-            device=device,
+            device=active_device,
             model=model_name,
             once=once,
             echo=click.echo,
@@ -550,7 +543,10 @@ def config_set(key: str, value: str) -> None:
     barge-in (on, off), claude-permissions (off, skip, acceptEdits,
     bypassPermissions), wake-word (on, off), wake-phrase (the spoken phrase),
     wake-model (path to a trained wake-word model, or "none" to clear),
-    and default-voice (a voice name, or "auto"/"none" to clear).
+    default-voice (a voice name, or "auto"/"none" to clear),
+    stt-device (auto, cuda, cpu), command-namespace-policy (allow-all,
+    ask-first-use, allowlist), and command-namespace-allowlist
+    (comma-separated namespaces, or "none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -598,11 +594,26 @@ def config_set(key: str, value: str) -> None:
         settings.set_default_voice(
             None if value.lower() in ("", "auto", "none", "default") else value
         )
+    elif key == "stt-device":
+        try:
+            settings.set_stt_device(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "command-namespace-policy":
+        try:
+            settings.set_command_namespace_policy(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "command-namespace-allowlist":
+        settings.set_command_namespace_allowlist(
+            None if value.lower() in ("", "none", "off") else value
+        )
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
             "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
-            "wake-model, or default-voice"
+            "wake-model, default-voice, stt-device, command-namespace-policy, "
+            "or command-namespace-allowlist"
         )
     click.echo(f"{key} = {value}")
 
@@ -633,11 +644,18 @@ def config_get(key: str) -> None:
         click.echo(settings.wake_model_path() or "none")
     elif key == "default-voice":
         click.echo(settings.default_voice_name() or "auto")
+    elif key == "stt-device":
+        click.echo(settings.stt_device())
+    elif key == "command-namespace-policy":
+        click.echo(settings.command_namespace_policy())
+    elif key == "command-namespace-allowlist":
+        click.echo(", ".join(settings.command_namespace_allowlist()) or "none")
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
             "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
-            "wake-model, or default-voice"
+            "wake-model, default-voice, stt-device, command-namespace-policy, "
+            "or command-namespace-allowlist"
         )
 
 

@@ -779,7 +779,7 @@ class TalkToMeApp(App[None]):
                 mode=self.mode,
                 session_id=None,
                 tmux_pane=None,
-                device="auto",
+                device=config.stt_device(),
                 model=None,
                 once=False,
                 echo=lambda line: self.post_message(Echo(line)),

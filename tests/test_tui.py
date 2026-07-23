@@ -221,6 +221,24 @@ class VoiceBridgeTests(_ConfigIsolation):
                 self.assertEqual(app.current_session_id, "session-abc-123")
         self.assertEqual(seen.get("permission"), "skip")
 
+    async def test_bridge_threads_the_persisted_stt_device(self) -> None:
+        from talktomeclaude import config
+
+        config.set_stt_device("cpu")
+        seen: dict = {}
+
+        def fake(**kwargs):
+            seen.update(kwargs)
+
+        with mock.patch.object(tui, "run_listen", fake):
+            app = TalkToMeApp(lambda _text: None)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.press("space")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+        self.assertEqual(seen.get("device"), "cpu")
+
     async def test_wake_key_toggles_and_persists(self) -> None:
         from talktomeclaude import config
 
@@ -548,20 +566,41 @@ class LiveSignalTests(unittest.TestCase):
 
 
 class DashboardCLITests(unittest.TestCase):
-    def test_no_arguments_launches_dashboard(self) -> None:
-        runner = CliRunner()
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        env = mock.patch.dict(
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": self.tmp.name}, clear=False
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.runner = CliRunner()
 
-        with mock.patch.object(cli, "_launch_dashboard") as launch:
-            result = runner.invoke(cli.main, [])
+    def test_no_arguments_runs_onboarding_then_launches_dashboard(self) -> None:
+        with mock.patch("talktomeclaude.onboarding.run_onboarding") as onboard, \
+                mock.patch.object(cli, "_launch_dashboard") as launch:
+            result = self.runner.invoke(cli.main, [])
 
         self.assertEqual(result.exit_code, 0, result.output)
+        onboard.assert_called_once_with()
+        launch.assert_called_once_with()
+
+    def test_completed_onboarding_goes_straight_to_the_dashboard(self) -> None:
+        from talktomeclaude import config
+        from talktomeclaude.onboarding import CURRENT_ONBOARDING_VERSION
+
+        config.set_onboarding_version(CURRENT_ONBOARDING_VERSION)
+        with mock.patch("talktomeclaude.onboarding.run_onboarding") as onboard, \
+                mock.patch.object(cli, "_launch_dashboard") as launch:
+            result = self.runner.invoke(cli.main, [])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        onboard.assert_not_called()
         launch.assert_called_once_with()
 
     def test_ui_command_launches_dashboard(self) -> None:
-        runner = CliRunner()
-
         with mock.patch.object(cli, "_launch_dashboard") as launch:
-            result = runner.invoke(cli.main, ["ui"])
+            result = self.runner.invoke(cli.main, ["ui"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         launch.assert_called_once_with()
