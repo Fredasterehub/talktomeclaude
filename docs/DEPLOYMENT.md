@@ -1,0 +1,154 @@
+# Deployment and Upgrade Runbook
+
+This document captures the operational knowledge needed to update and validate
+TalkToMeClaude, especially on native Windows with remote Claude Code, CUDA speech
+recognition, and Chatterbox cloned voices.
+
+## Deployment Model
+
+- The microphone, speech recognition, TTS, and terminal UI run on the user's local
+  machine.
+- Claude Code may run locally or over passwordless SSH. A remote project directory is
+  passed to `claude -p` through a safely quoted login shell.
+- Source installs are editable. A code-only update does not require rebuilding the
+  virtual environment, but the running `talktomeclaude` process must be restarted.
+- Reinstall dependencies only when `pyproject.toml`, an optional engine, or a pinned
+  runtime changes.
+
+Confirm which checkout an installed command imports before debugging the wrong tree:
+
+```powershell
+python -c "import talktomeclaude; print(talktomeclaude.__file__)"
+```
+
+## Upgrade Procedure
+
+1. Start from a clean feature worktree. Do not overwrite unrelated local changes.
+2. Fetch the target branch and merge it into the feature worktree before resolving
+   overlapping CLI or configuration changes.
+3. Keep the no-argument dashboard, CLI subcommands, and persisted configuration
+   backward compatible.
+4. Refresh the editable install only if its source target changed:
+
+   ```powershell
+   uv pip install --python .venv\Scripts\python.exe -e .
+   ```
+
+5. If dependency declarations changed, install them into the existing environment;
+   do not recreate a working venv without a concrete reason.
+6. Run the verification sequence below on Windows and Linux.
+7. Push the feature branch only after both worktrees are clean and green.
+
+## Required Verification
+
+Run from the repository root with the environment's Python:
+
+```powershell
+python -m unittest discover -s tests -q
+python -m compileall -q src tests
+git diff --check
+talktomeclaude --help
+talktomeclaude voices
+talktomeclaude doctor
+talktomeclaude config get default-voice
+```
+
+When `.kiln/law/check.sh` is available, run it as the canonical project check as well.
+CI must retain native Windows and Linux Python 3.12 coverage.
+
+For CUDA changes, unit tests are insufficient. In a fresh Windows process, verify:
+
+1. `cuda_available()` returns true.
+2. A real cached audio fixture transcribes with `large-v3`, `device=cuda`, and
+   `compute_type=float16`.
+3. In that same process, a cloned voice renders a non-empty WAV. This catches CUDA DLL
+   combinations that import successfully but fail during a Torch convolution.
+
+For remote changes, call the real `_prompt_claude` path with `on_wait` enabled and a
+Unicode response. Confirm valid JSON, a non-empty reply, and a session ID.
+
+## Windows Runtime Invariants
+
+These are regression boundaries, not implementation suggestions:
+
+- Explicitly use UTF-8 for subprocess text input and output. Native Windows otherwise
+  uses a legacy code page such as `cp1252`, which fails on emoji and punctuation.
+- Open SSH/Claude subprocesses with explicit stdin, stdout, and stderr pipes. Normalize
+  missing captured values before JSON parsing.
+- Close file descriptors returned by `tempfile.mkstemp` before another Windows process
+  writes, reads, plays, or deletes that path.
+- A CUDA-enabled Torch build must load its bundled CUDA/cuDNN libraries before
+  CTranslate2. Do not also preload the standalone NVIDIA cuDNN wheel in that process.
+  CTranslate2 can reuse Torch's loaded CUDA runtime. On systems without CUDA Torch, the
+  NVIDIA wheel discovery path remains necessary for Faster Whisper.
+- Test actual inference, not only `import torch`, `import ctranslate2`, or device counts.
+  Conflicting cuDNN builds can import successfully and fail only during computation.
+- Preserve CPU fallback for automatic STT selection. Explicit CUDA failures should be
+  reported cleanly rather than producing an unhandled traceback.
+
+## CUDA and Voice Cloning
+
+Use `talktomeclaude doctor` as the canonical install recipe. The Windows RTX deployment
+validated during development used:
+
+- Python 3.12
+- Torch and torchaudio 2.11.0 with CUDA 12.8
+- Chatterbox TTS 0.1.7
+- The companion versions printed by `talktomeclaude doctor`
+
+Install into the existing environment with `uv pip install --python <python> ...`.
+The environment may intentionally have no `pip` module.
+
+Chatterbox weights are cached under `~/.cache/talktomeclaude/hf`. The first cloned
+reply in each new application process loads cached weights into GPU memory. Later
+replies reuse the module-level model. The `Sampling` progress shown for each sentence
+is inference, not a download. A valid cache can be proved by rendering twice with
+`HF_HUB_OFFLINE=1`; the model object should be reused and the second render should be
+substantially faster.
+
+Do not delete model caches during ordinary upgrades. A Hugging Face token belongs in
+`HF_TOKEN` or the Hugging Face credential store, never in the repository or this file.
+
+## Voice Registry
+
+Persistent settings and voice references live outside the checkout:
+
+- Configuration: `~/.config/talktomeclaude/config.json`
+- Registry: `~/.config/talktomeclaude/voices.json`
+- Clone references: `~/.config/talktomeclaude/voice-refs/`
+
+Register a reference without generating a sample:
+
+```powershell
+talktomeclaude voice create NAME --reference PATH --no-sample
+```
+
+Select the active voice:
+
+```powershell
+talktomeclaude config set default-voice NAME
+```
+
+At the time of writing, the dashboard's `V` key toggles spoken replies; it is not a
+voice picker. Preserve this behavior until a deliberate UX change updates the key
+label, interaction, tests, and documentation together.
+
+## Expected Warnings and Performance
+
+- Diffusers, Torch attention, and Chatterbox may print upstream deprecation warnings.
+  Treat them separately from nonzero exits, missing WAV output, or CUDA exceptions.
+- A cloned voice can take roughly 10-20 seconds on first use in a new process while
+  cached weights load. Subsequent short replies should be much faster.
+- Do not claim repeated downloads based on `Sampling` progress. Verify with offline
+  mode, cache file changes, or network observation.
+
+## Release Evidence
+
+Record these facts in the PR or commit message for changes touching deployment:
+
+- exact test counts and platforms
+- Python, Torch, CUDA, and GPU versions for hardware checks
+- STT tier actually used
+- cloned voice actually rendered and WAV size was nonzero
+- remote Claude JSON/session round trip result
+- known optional engines or physical microphone paths not tested
