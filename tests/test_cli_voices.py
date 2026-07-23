@@ -20,7 +20,7 @@ class VoiceCliTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": str(self.root)}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": str(self.root)}, clear=False
         )
         self.env.start()
         self.addCleanup(self.env.stop)

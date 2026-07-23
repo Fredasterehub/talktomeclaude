@@ -114,6 +114,22 @@ def is_available(voice: Voice) -> bool:
             return clone.clone_available()
         except Exception:
             return False
+    if voice.engine == "f5":
+        reference = voice.params.get("reference")
+        ref_text = voice.params.get("ref_text")
+        if not (
+            reference
+            and Path(reference).is_file()
+            and isinstance(ref_text, str)
+            and ref_text.strip()
+        ):
+            return False
+        try:
+            from talktomeclaude import f5
+
+            return f5.f5_available()
+        except Exception:
+            return False
     model = voice.params.get("model")
     config = voice.params.get("config")
     if model and config:
@@ -131,7 +147,7 @@ def get_voice(name: str) -> Voice:
     except registry.RegistryError as exc:
         raise TTSError(str(exc)) from exc
     if registered is not None:
-        quality = "n/a" if registered.engine == "clone" else "medium"
+        quality = "n/a" if registered.engine in {"clone", "f5"} else "medium"
         return Voice(
             name=registered.name,
             language=registered.language,
@@ -211,6 +227,19 @@ def _synthesize_clone(text: str, out_path: Path, voice: Voice) -> Voice:
     return voice
 
 
+def _synthesize_f5(text: str, out_path: Path, voice: Voice) -> Voice:
+    from talktomeclaude import f5  # optional engine, imported lazily
+
+    reference = voice.params.get("reference")
+    ref_text = voice.params.get("ref_text")
+    if not reference:
+        raise TTSError(f"F5 voice {voice.name!r} has no reference clip")
+    if not isinstance(ref_text, str) or not ref_text.strip():
+        raise TTSError(f"F5 voice {voice.name!r} has no reference text")
+    f5.synthesize_f5(text, Path(out_path), reference, ref_text)
+    return voice
+
+
 def synthesize(
     text: str,
     out_path: Path,
@@ -226,6 +255,8 @@ def synthesize(
     voice = get_voice(voice_name) if voice_name else default_voice()
     if voice.engine == "clone":
         return _synthesize_clone(text, Path(out_path), voice)
+    if voice.engine == "f5":
+        return _synthesize_f5(text, Path(out_path), voice)
     model_path, config_path = voice_files(voice, on_status)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
@@ -247,3 +278,41 @@ def synthesize(
     if not out_path.is_file() or out_path.stat().st_size == 0:
         raise TTSError(f"piper produced no audio at {out_path}")
     return voice
+
+
+def play_wav(path: Path) -> None:
+    """Play a WAV file through the default output device, blocking."""
+    import wave
+
+    try:
+        import numpy
+        import sounddevice
+    except (ImportError, OSError) as exc:
+        raise TTSError(f"audio playback unavailable ({exc})") from exc
+    with wave.open(str(path), "rb") as handle:
+        frames = handle.readframes(handle.getnframes())
+        samples = numpy.frombuffer(frames, dtype=numpy.int16)
+        channels = handle.getnchannels()
+        if channels > 1:
+            samples = samples.reshape(-1, channels)
+        sounddevice.play(samples, samplerate=handle.getframerate(), blocking=True)
+
+
+def synthesize_and_play(
+    text: str,
+    voice_name: str | None = None,
+    on_status=None,
+) -> Voice:
+    """Render *text* and play it immediately; the audition path onboarding and
+    the dashboard share. Blocking — callers run it off the UI thread."""
+    import tempfile
+
+    handle, raw_path = tempfile.mkstemp(prefix="talktomeclaude-audition-", suffix=".wav")
+    os.close(handle)
+    out_path = Path(raw_path)
+    try:
+        voice = synthesize(text, out_path, voice_name, on_status)
+        play_wav(out_path)
+        return voice
+    finally:
+        out_path.unlink(missing_ok=True)

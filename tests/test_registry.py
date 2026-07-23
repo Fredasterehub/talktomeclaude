@@ -19,7 +19,7 @@ class RegistryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         # Route config_dir() (and therefore the registry + voice-refs) here.
         self.env = mock.patch.dict(
-            os.environ, {"CLAUDE_PLUGIN_DATA": str(self.root)}, clear=False
+            os.environ, {"TALKTOMECLAUDE_CONFIG_DIR": str(self.root)}, clear=False
         )
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -74,6 +74,27 @@ class RegistryTests(unittest.TestCase):
         # Original still present; the registry copied rather than moved.
         self.assertTrue(ref.is_file())
 
+    def test_add_f5_copies_reference_and_stores_transcript(self) -> None:
+        ref = self._make_ref()
+        voice = registry.add_f5("rick_f5", ref, "Wubba lubba dub dub.")
+        stored = Path(voice.params["reference"])
+        self.assertEqual(voice.engine, "f5")
+        self.assertEqual(voice.params["ref_text"], "Wubba lubba dub dub.")
+        self.assertEqual(stored, registry.refs_dir() / "rick_f5.wav")
+        self.assertTrue(stored.is_file())
+        saved = json.loads(registry.registry_path().read_text())
+        self.assertEqual(saved["voices"]["rick_f5"]["params"]["reference"], "rick_f5.wav")
+
+    def test_add_f5_requires_reference_text(self) -> None:
+        with self.assertRaises(registry.RegistryError):
+            registry.add_f5("silent", self._make_ref(), "   ")
+
+    def test_add_f5_rolls_back_clip_when_save_fails(self) -> None:
+        with mock.patch.object(registry, "_save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                registry.add_f5("rick_f5", self._make_ref(), "Reference transcript.")
+        self.assertFalse((registry.refs_dir() / "rick_f5.wav").exists())
+
     def test_remove_clone_deletes_copied_reference(self) -> None:
         ref = self._make_ref()
         voice = registry.add_clone("gimli", ref)
@@ -81,6 +102,13 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(stored.is_file())
         registry.remove("gimli")
         self.assertIsNone(registry.get("gimli"))
+        self.assertFalse(stored.is_file())
+
+    def test_remove_f5_deletes_copied_reference(self) -> None:
+        voice = registry.add_f5("gimli_f5", self._make_ref(), "And my axe.")
+        stored = Path(voice.params["reference"])
+        registry.remove("gimli_f5")
+        self.assertIsNone(registry.get("gimli_f5"))
         self.assertFalse(stored.is_file())
 
     def test_remove_piper_keeps_external_model_file(self) -> None:

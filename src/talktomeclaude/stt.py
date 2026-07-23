@@ -16,7 +16,7 @@ import glob
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,13 @@ class STTTier:
 
     def describe(self) -> str:
         return f"model={self.model} device={self.device} compute_type={self.compute_type}"
+
+
+@dataclass(frozen=True)
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
 
 
 GPU_TIER = STTTier(model="large-v3", device="cuda", compute_type="float16")
@@ -164,7 +171,7 @@ def detect_tier(device: str = "auto", model: str | None = None) -> STTTier:
     return tier
 
 
-def _run_tier(tier: STTTier, audio_path: Path) -> str:
+def _tier_segments(tier: STTTier, audio_path: Path):
     from faster_whisper import WhisperModel
 
     whisper = WhisperModel(
@@ -178,7 +185,56 @@ def _run_tier(tier: STTTier, audio_path: Path) -> str:
         beam_size=5,
         hotwords=HOTWORDS,
     )
+    return segments
+
+
+def _run_tier(tier: STTTier, audio_path: Path) -> str:
+    segments = _tier_segments(tier, audio_path)
     return " ".join(part for part in (segment.text.strip() for segment in segments) if part)
+
+
+def _run_tier_timestamped(tier: STTTier, audio_path: Path) -> list[TranscriptSegment]:
+    segments = _tier_segments(tier, audio_path)
+    return [
+        TranscriptSegment(float(segment.start), float(segment.end), text)
+        for segment in segments
+        if (text := segment.text.strip())
+    ]
+
+
+_Result = TypeVar("_Result")
+
+
+def _transcribe_with_fallback(
+    audio_path: Path,
+    device: str,
+    model: str | None,
+    on_status: Callable[[str], None] | None,
+    runner: Callable[[STTTier, Path], _Result],
+) -> tuple[_Result, STTTier]:
+    if not audio_path.is_file():
+        raise STTError(f"audio file not found: {audio_path}")
+    status = on_status or (lambda message: None)
+    tier = detect_tier(device, model)
+    status(f"stt tier: {tier.describe()}")
+    try:
+        return runner(tier, audio_path), tier
+    except Exception as exc:
+        if tier.device != "cuda" or device == "cuda":
+            raise STTError(f"transcription failed on {tier.describe()}: {exc}") from exc
+        fallback = CPU_TIER if model is None else STTTier(
+            model=model, device=CPU_TIER.device, compute_type=CPU_TIER.compute_type
+        )
+        status(
+            f"stt tier degraded: {tier.describe()} failed ({exc}); "
+            f"falling back to {fallback.describe()}"
+        )
+        try:
+            return runner(fallback, audio_path), fallback
+        except Exception as fallback_exc:
+            raise STTError(
+                f"transcription failed on {fallback.describe()}: {fallback_exc}"
+            ) from fallback_exc
 
 
 def transcribe_file(
@@ -192,26 +248,18 @@ def transcribe_file(
     If the GPU tier fails to initialize or decode, falls back to the CPU tier
     and reports it through *on_status* — degradation is never silent (D-2).
     """
-    if not audio_path.is_file():
-        raise STTError(f"audio file not found: {audio_path}")
-    status = on_status or (lambda message: None)
-    tier = detect_tier(device, model)
-    status(f"stt tier: {tier.describe()}")
-    try:
-        return _run_tier(tier, audio_path), tier
-    except Exception as exc:
-        if tier.device != "cuda" or device == "cuda":
-            raise STTError(f"transcription failed on {tier.describe()}: {exc}") from exc
-        fallback = CPU_TIER if model is None else STTTier(
-            model=model, device=CPU_TIER.device, compute_type=CPU_TIER.compute_type
-        )
-        status(
-            f"stt tier degraded: {tier.describe()} failed ({exc}); "
-            f"falling back to {fallback.describe()}"
-        )
-        try:
-            return _run_tier(fallback, audio_path), fallback
-        except Exception as fallback_exc:
-            raise STTError(
-                f"transcription failed on {fallback.describe()}: {fallback_exc}"
-            ) from fallback_exc
+    return _transcribe_with_fallback(
+        audio_path, device, model, on_status, _run_tier
+    )
+
+
+def transcribe_file_with_timestamps(
+    audio_path: Path,
+    device: str = "auto",
+    model: str | None = None,
+    on_status: Callable[[str], None] | None = None,
+) -> tuple[list[TranscriptSegment], STTTier]:
+    """Transcribe locally without flattening faster-whisper segment bounds."""
+    return _transcribe_with_fallback(
+        audio_path, device, model, on_status, _run_tier_timestamped
+    )
