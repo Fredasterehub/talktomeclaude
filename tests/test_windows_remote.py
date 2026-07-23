@@ -292,6 +292,29 @@ class TranscriberFallbackTests(unittest.TestCase):
         self.assertEqual(transcriber.tier.device, "cpu")
         self.assertTrue(any("degraded" in message for message in statuses))
 
+    def test_live_auto_cuda_lazy_decode_failure_falls_back_to_cpu(self) -> None:
+        def failed_segments():
+            raise RuntimeError("cuDNN failed while decoding")
+            yield
+
+        gpu = mock.Mock()
+        gpu.transcribe.return_value = (failed_segments(), None)
+        cpu = mock.Mock()
+        cpu.transcribe.return_value = ([SimpleNamespace(text=" recovered ")], None)
+        statuses: list[str] = []
+
+        with mock.patch.object(
+            listen, "detect_tier", side_effect=[GPU_TIER, CPU_TIER]
+        ), mock.patch.object(
+            listen.UtteranceTranscriber, "_load", side_effect=[gpu, cpu]
+        ):
+            transcriber = listen.UtteranceTranscriber("auto", on_status=statuses.append)
+            result = transcriber.transcribe(object())
+
+        self.assertEqual(result, "recovered")
+        self.assertEqual(transcriber.tier.device, "cpu")
+        self.assertTrue(any("degraded" in message for message in statuses))
+
 
 class RemoteCwdConfigAndCLITests(unittest.TestCase):
     def setUp(self) -> None:

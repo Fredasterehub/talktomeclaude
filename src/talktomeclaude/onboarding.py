@@ -291,8 +291,11 @@ class OnboardingScreen(Screen[bool]):
 
     def action_accept_defaults(self) -> None:
         """The defaults fast path: recommended defaults, then Finish."""
-        config.set_recording_mode(config.DEFAULT_RECORDING_MODE)
-        config.set_claude_permissions("off")
+        existing = config.load()
+        if "recording-mode" not in existing:
+            config.set_recording_mode(config.DEFAULT_RECORDING_MODE)
+        if "claude-permissions" not in existing:
+            config.set_claude_permissions("off")
         self._finish()
 
     def _finish(self) -> None:

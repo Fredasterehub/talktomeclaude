@@ -365,10 +365,10 @@ talktomeclaude config set wake-model /path/to/yo-claude.onnx
 ```
 The detector is a local openWakeWord model trained for your phrase (an
 optional install — nothing phones home). If wake mode is on but the model or
-the detector runtime is missing, listening degrades to ungated capture and
-tells you why — it never fails silently. In the dashboard, press `W` to toggle
-wake mode (even mid-session); the `WAKE ON` / `WAKE OFF` chip always shows the
-current state.
+the detector runtime is missing, listening fails closed to manual push-to-talk
+and tells you why — it never opens an ungated microphone silently. In the
+dashboard, press `W` to toggle wake mode (even mid-session); the `WAKE ON` /
+`WAKE OFF` chip always shows the current state.
 
 **Voice-activated commands** — the dashboard's voice session discovers the
 fireable commands your Claude session advertises (custom slash commands,
@@ -413,7 +413,9 @@ reference segment is cut automatically. Every automatically selected segment
 must be auditioned and explicitly confirmed before any voice is created — no
 unattended cloning. The optional cloning engine must be installed for
 synthesis (`talktomeclaude doctor` prints the recipe); registration works
-either way.
+either way. The YouTube source additionally requires `yt-dlp`, `ffmpeg`, and
+`ffprobe` on `PATH`; those media tools are external optional prerequisites and
+are not installed by the Python package.
 
 **Claude permissions** — the default posture is `off`, so talktomeclaude adds no
 permission flag to the Claude command it builds. Set or inspect it like the

@@ -43,8 +43,7 @@ def setup(reset: bool, force: bool) -> None:
 
     if reset:
         config.set_onboarding_version(0)
-    if reset or force or config.onboarding_needed(onboarding.CURRENT_ONBOARDING_VERSION):
-        onboarding.run_onboarding()
+    onboarding.run_onboarding()
 
 
 @main.command()

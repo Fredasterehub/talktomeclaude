@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import threading
 import unittest
 from unittest import mock
 
@@ -41,6 +42,34 @@ class OnSessionCallbackTests(unittest.TestCase):
             )
 
         self.assertEqual(sessions, ["session-99"])
+
+    def test_stop_during_transcriber_startup_exits_before_capture(self) -> None:
+        stop_event = threading.Event()
+
+        def load_transcriber(*_args, **_kwargs):
+            stop_event.set()
+            return mock.Mock()
+
+        with mock.patch.object(
+            listen, "UtteranceTranscriber", side_effect=load_transcriber
+        ), mock.patch.object(listen, "_record_always_on") as record, mock.patch.object(
+            listen, "_prompt_claude"
+        ) as prompt:
+            listen.run_listen(
+                mode="always-on",
+                session_id=None,
+                tmux_pane=None,
+                device="cpu",
+                model=None,
+                once=False,
+                echo=lambda _message: None,
+                speak=lambda _message: None,
+                status=lambda _message: None,
+                stop_event=stop_event,
+            )
+
+        record.assert_not_called()
+        prompt.assert_not_called()
 
 
 if __name__ == "__main__":

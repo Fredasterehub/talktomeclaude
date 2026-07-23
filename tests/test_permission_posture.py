@@ -34,6 +34,13 @@ class PermissionConfigTests(unittest.TestCase):
 
 
 class BuildClaudeCommandPermissionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.which = mock.patch(
+            "talktomeclaude.listen.shutil.which", return_value="/usr/bin/claude"
+        )
+        self.which.start()
+        self.addCleanup(self.which.stop)
+
     def test_off_adds_no_flags(self) -> None:
         argv = build_claude_command("hi", None, permission="off")
         self.assertNotIn("--dangerously-skip-permissions", argv)

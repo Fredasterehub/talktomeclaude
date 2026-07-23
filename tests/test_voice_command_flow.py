@@ -64,7 +64,9 @@ class VoiceCommandDispatchTests(_Isolated):
         transcriber = mock.Mock()
         transcriber.transcribe.side_effect = lambda audio: audio or ""
 
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "_record_always_on", side_effect=lambda **kwargs: next_take()
         ), mock.patch.object(
             listen, "UtteranceTranscriber", return_value=transcriber
@@ -165,7 +167,9 @@ class _LoopHarness(_Isolated):
         transcriber = mock.Mock()
         transcriber.transcribe.side_effect = lambda audio: audio or ""
 
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "_record_always_on", side_effect=lambda **kwargs: next_take()
         ), mock.patch.object(
             listen, "UtteranceTranscriber", return_value=transcriber
@@ -432,7 +436,9 @@ class WakeGateTests(_Isolated):
     def _run_once(self, spoken: list[str]) -> None:
         transcriber = mock.Mock()
         transcriber.transcribe.return_value = "hello"
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "_record_always_on", return_value=object()
         ), mock.patch.object(
             listen, "UtteranceTranscriber", return_value=transcriber
@@ -615,7 +621,9 @@ class ConveyanceDeliveryTests(_Isolated):
         os.chdir(workdir.name)
         self.addCleanup(os.chdir, cwd)
 
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "_record_always_on", side_effect=next_take
         ), mock.patch.object(
             listen, "UtteranceTranscriber", return_value=transcriber
@@ -674,7 +682,9 @@ class ConveyanceDeliveryTests(_Isolated):
         os.chdir(workdir.name)
         self.addCleanup(os.chdir, cwd)
 
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "_record_always_on", side_effect=next_take
         ), mock.patch.object(
             listen, "UtteranceTranscriber", return_value=transcriber
@@ -700,7 +710,9 @@ class BargeInWiringTests(_Isolated):
         transcriber = mock.Mock()
         transcriber.transcribe.return_value = "hello"
         interruptible = mock.Mock(return_value=False)
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "headphones_present", return_value=True
         ), mock.patch.object(
             listen, "_speak_interruptible", interruptible
@@ -727,7 +739,9 @@ class BargeInWiringTests(_Isolated):
         transcriber = mock.Mock()
         transcriber.transcribe.return_value = "hello"
         spoken: list[str] = []
-        with mock.patch.object(os, "name", "posix"), mock.patch.object(
+        with mock.patch.object(
+            listen, "_is_windows", return_value=False
+        ), mock.patch.object(
             listen, "headphones_present", return_value=False
         ), mock.patch.object(
             listen,

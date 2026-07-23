@@ -69,6 +69,16 @@ class SetupCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(config.onboarding_version(), 0)  # untouched
 
+    def test_plain_setup_reruns_current_onboarding(self) -> None:
+        from talktomeclaude import onboarding
+
+        config.set_onboarding_version(onboarding.CURRENT_ONBOARDING_VERSION)
+        with mock.patch.object(onboarding, "run_onboarding") as run:
+            result = self.runner.invoke(cli.main, ["setup"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        run.assert_called_once_with()
+
 
 def _recommendation(feasible: bool):
     from talktomeclaude import advisor
@@ -127,6 +137,26 @@ class OnboardingScreenTests(_ScreenHarness):
             await pilot.press("enter")
             await pilot.pause()
             self.assertIn("done", result)
+
+    async def test_defaults_fast_path_preserves_existing_settings(self) -> None:
+        from talktomeclaude.onboarding import OnboardingScreen
+
+        config.set_recording_mode("push-toggle")
+        config.set_claude_permissions("acceptEdits")
+        config.set_default_voice("rick")
+        config.set_remote("dev@example")
+        app, result = self._host(OnboardingScreen())
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+
+        self.assertIn("done", result)
+        self.assertEqual(config.recording_mode(), "push-toggle")
+        self.assertEqual(config.claude_permissions(), "acceptEdits")
+        self.assertEqual(config.default_voice_name(), "rick")
+        self.assertEqual(config.remote(), "dev@example")
 
     async def test_customize_walks_the_guided_sequence_and_persists(self) -> None:
         from talktomeclaude.onboarding import OnboardingScreen

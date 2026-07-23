@@ -522,7 +522,19 @@ def _speak_interruptible(
         except Exception:
             pass
         chunks = []
-    worker.join(5.0)
+    if chunks or stopping():
+        # A cloned voice may still be synthesizing when the interruption lands.
+        # Drain the worker instead of abandoning it: repeated stop calls catch
+        # playback as soon as synthesis hands off to sounddevice, so stale audio
+        # cannot leak into the next turn or survive session shutdown.
+        while worker.is_alive():
+            try:
+                sounddevice.stop()
+            except Exception:
+                pass
+            worker.join(0.05)
+    else:
+        worker.join()
     if failure:
         raise failure[0]
     return _finish(chunks)
@@ -609,7 +621,7 @@ class UtteranceTranscriber:
 
     def transcribe(self, audio) -> str:
         try:
-            segments = self._decode(audio)
+            return self._transcribe_text(audio)
         except Exception as exc:
             if self.tier.device != "cuda" or self._requested_device == "cuda":
                 raise ListenError(
@@ -623,11 +635,14 @@ class UtteranceTranscriber:
             try:
                 self._whisper = self._load(fallback)
                 self.tier = fallback
-                segments = self._decode(audio)
+                return self._transcribe_text(audio)
             except Exception as fallback_exc:
                 raise ListenError(
                     f"transcription failed on {fallback.describe()}: {fallback_exc}"
                 ) from fallback_exc
+
+    def _transcribe_text(self, audio) -> str:
+        segments = self._decode(audio)
         return " ".join(
             part for part in (segment.text.strip() for segment in segments) if part
         )
@@ -1353,7 +1368,11 @@ def run_listen(
     """
     set_phase = on_phase or (lambda _phase: None)
     set_phase("starting")
+    if stop_event is not None and stop_event.is_set():
+        return
     transcriber = UtteranceTranscriber(device, model, on_status=status)
+    if stop_event is not None and stop_event.is_set():
+        return
     if remote:
         status(f"remote: Claude Code runs on {remote} over SSH; voice stays local")
         if remote_cwd:

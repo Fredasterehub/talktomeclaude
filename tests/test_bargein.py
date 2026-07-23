@@ -72,6 +72,53 @@ class SpeakInterruptibleTests(unittest.TestCase):
         self.assertIsNone(captured)
         sounddevice.stop.assert_not_called()
 
+    def test_slow_synthesis_cannot_leak_delayed_playback(self) -> None:
+        sounddevice = self._fake_hardware()
+        synthesis_started = threading.Event()
+        release_synthesis = threading.Event()
+        barge_detected = threading.Event()
+        playback_started = threading.Event()
+        playback_stopped = threading.Event()
+        calls = {"n": 0}
+
+        def rms(_block) -> float:
+            calls["n"] += 1
+            if calls["n"] <= 6:
+                return 0.0
+            if calls["n"] <= 10:
+                return 0.5
+            return 0.0
+
+        def stop() -> None:
+            barge_detected.set()
+            if playback_started.is_set():
+                playback_stopped.set()
+
+        def slow_speak(_text: str) -> None:
+            synthesis_started.set()
+            release_synthesis.wait(2)
+            playback_started.set()
+            playback_stopped.wait(2)
+
+        sounddevice.stop.side_effect = stop
+
+        def release_after_barge() -> None:
+            synthesis_started.wait(2)
+            barge_detected.wait(2)
+            release_synthesis.set()
+
+        releaser = threading.Thread(target=release_after_barge)
+        releaser.start()
+        with mock.patch.object(listen, "_sounddevice", return_value=sounddevice), \
+                mock.patch.object(listen, "_rms", side_effect=rms), \
+                mock.patch.object(listen, "_finish", side_effect=lambda c: c or None):
+            captured = listen._speak_interruptible(slow_speak, "a cloned reply")
+        releaser.join(2)
+
+        self.assertIsNotNone(captured)
+        self.assertTrue(playback_started.is_set())
+        self.assertTrue(playback_stopped.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()
