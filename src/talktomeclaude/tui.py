@@ -78,6 +78,7 @@ _TTMJ_VARS = {
     "ttmj-ochre": _OCHRE,
     "ttmj-gray": _GRAY,
     "ttmj-gray-dim": "#8f846b",
+    "ttmj-border": "#42382a",
     "vu-idle": _OCHRE,
     "vu-hot": _AMBER_HOT,
     "phase-recording": "#c14a2b",
@@ -104,57 +105,27 @@ TTMJ_THEME = Theme(
     variables=dict(_TTMJ_VARS),
 )
 
-# ── the skull-in-headphones-with-boom-mic wordmark ───────────────────────────
-# Cream skull face, amber ear-cups and boom mic — echoing assets/skull-emblem.
-# Fixed-width segments keep the two-tone colouring column-aligned.
-_CUP = "|##|"
-_SKULL_FACE = [
-    "  _______  ",
-    " /  . .  \\ ",
-    "|  (o)(o) |",
-    "|    ^    |",
-    "|  \\___/  |",
-    " \\ '''''' /",
-    "  '-----'  ",
-]
-# Which face rows carry the ear-cups (and, on one row, the boom mic).
-_CUP_ROWS = {2, 3, 4}
-_MIC_ROW = 3
-_WORDMARK = {
-    2: ("TALK TO ME, CLAUDE", f"bold {_CREAM}"),
-    3: ("local voice link for Claude Code", f"{_GRAY}"),
-    4: ("It's a long road.", f"italic {_OCHRE}"),
-}
-_GAP = " " * (1 + len(_CUP) + 1)  # face indent on cup-less rows
+# ── the wordmark — a voice waveform, then the name (two-tone, poster identity) ─
+_WAVE = "▁▂▃▅▇▅▃▂▁"
 
 
 def _header_full() -> Text:
     text = Text(no_wrap=True)
-    cup = f"bold {_AMBER}"
-    face = _CREAM
-    for i, glyphs in enumerate(_SKULL_FACE):
-        if i:
-            text.append("\n")
-        if i in _CUP_ROWS:
-            text.append(f" {_CUP} ", style=cup)
-            text.append(glyphs, style=face)
-            text.append(f" {_CUP}", style=cup)
-            if i == _MIC_ROW:
-                text.append("==o", style=f"bold {_AMBER_HOT}")
-        else:
-            text.append(_GAP)
-            text.append(glyphs, style=face)
-        word = _WORDMARK.get(i)
-        if word:
-            text.append("    ")
-            text.append(word[0], style=word[1])
+    text.append(_WAVE, style=f"bold {_AMBER}")
+    text.append("   ")
+    text.append("TALK TO ME, ", style=f"bold {_CREAM}")
+    text.append("CLAUDE", style=f"bold {_AMBER}")
+    text.append("\n")
+    text.append("local voice for Claude Code", style=_GRAY)
+    text.append("   ·   it's a long road", style=f"italic {_OCHRE}")
     return text
 
 
 def _header_compact() -> Text:
     text = Text(no_wrap=True)
-    text.append("☠ ", style=f"bold {_AMBER}")
-    text.append("TALK TO ME, CLAUDE", style=f"bold {_AMBER}")
+    text.append("▂▄▆ ", style=f"bold {_AMBER}")
+    text.append("TALK TO ME, ", style=f"bold {_CREAM}")
+    text.append("CLAUDE", style=f"bold {_AMBER}")
     text.append("  ·  local voice for Claude Code", style=_GRAY)
     return text
 
@@ -163,64 +134,70 @@ def _header_compact() -> Text:
 _TTMJ_CSS = """
 Screen { background: $background; color: $foreground; layout: vertical; }
 
-#header { height: auto; background: $panel; border-bottom: heavy $accent; padding: 0 1; }
-#band { height: auto; padding: 0 1; }
-#header-meta { height: 1; padding: 0 1; }
+#header { height: auto; padding: 1 2 0 2; }
+#band { height: auto; }
 
-.pill {
-    width: auto; background: $accent; color: $background; text-style: bold;
-    padding: 0 1; height: 1; margin: 0 1 0 0;
-}
-.pill.-recording { background: $phase-recording; color: $foreground; }
-.pill.-transcribing { background: $phase-transcribing; color: $foreground; }
-.pill.-thinking { background: $phase-thinking; color: $background; }
-.pill.-speaking { background: $phase-speaking; color: $background; }
-.pill.-error { background: $phase-error; color: $foreground; }
-.pill.-starting { background: $ttmj-ochre; color: $foreground; }
+/* Status strip: a phase dot + label, then quiet dim metadata — no colour blocks. */
+#statusbar { height: 1; margin-top: 1; }
+#phase { width: auto; text-style: bold; color: $ttmj-gray; margin: 0 3 0 0; }
+#phase.-ready { color: $ttmj-gray; }
+#phase.-starting { color: $ttmj-ochre; }
+#phase.-recording { color: $phase-recording; }
+#phase.-transcribing { color: $phase-transcribing; }
+#phase.-thinking { color: $phase-thinking; }
+#phase.-speaking { color: $phase-speaking; }
+#phase.-error { color: $phase-error; }
 
-.chip {
-    width: auto; background: $surface; color: $ttmj-gray; text-style: bold;
-    padding: 0 1; height: 1; margin: 0 1 0 0;
-}
+.chip { width: auto; color: $ttmj-gray-dim; margin: 0 3 0 0; }
 
+/* Ambient VU: a thin borderless meter, muted at rest, warming to ochre on sound. */
+#vu { width: 1fr; height: 1; margin: 1 2 0 2; }
+#vu > .sparkline--max-color { color: $ttmj-ochre; }
+#vu > .sparkline--min-color { color: $ttmj-border; }
+
+#status { height: 1; padding: 0 2; margin-top: 1; color: $ttmj-gray-dim; text-style: italic; }
+#status.-recording { color: $phase-recording; text-style: bold; }
+#status.-transcribing { color: $phase-transcribing; text-style: none; }
+#status.-thinking { color: $phase-thinking; text-style: none; }
+#status.-speaking { color: $phase-speaking; text-style: none; }
+#status.-error { color: $phase-error; text-style: bold; }
+
+#body { height: 1fr; padding: 1 2; }
 .panel {
-    background: $surface; border: round $ttmj-ochre;
-    border-title-color: $accent; border-title-align: left;
+    background: $background; border: round $ttmj-border;
+    border-title-color: $ttmj-gray-dim; border-title-align: left;
     padding: 0 1;
+    scrollbar-size: 1 1;
+    scrollbar-background: $background;
+    scrollbar-background-hover: $background;
+    scrollbar-background-active: $background;
+    scrollbar-color: $ttmj-border;
+    scrollbar-color-hover: $ttmj-ochre;
+    scrollbar-color-active: $accent;
 }
-.panel:focus-within { border: round $primary; }
-
-#signal { height: 3; }
-#vu { width: 1fr; height: 1; }
-#vu > .sparkline--max-color { color: $vu-hot; }
-#vu > .sparkline--min-color { color: $vu-idle; }
-
-#status { height: 1; padding: 0 2; color: $ttmj-gray; text-style: bold; }
-#status.-recording { color: $phase-recording; }
-#status.-transcribing { color: $phase-transcribing; }
-#status.-thinking { color: $phase-thinking; }
-#status.-speaking { color: $phase-speaking; }
-#status.-error { color: $phase-error; }
-
-#body { height: 1fr; }
-#dialogue { width: 1fr; }
-#session { width: 2fr; }
+.panel:focus-within { border: round $accent; border-title-color: $accent; }
+#dialogue { width: 1fr; margin-right: 1; overflow-x: hidden; }
+#session { width: 1fr; overflow-x: hidden; }
 
 /* In compact the band renders a single wordmark line (HeaderBand.compact); it
    stays visible so the brand identity survives on small terminals. The body
    also stacks so both panels keep a usable width. */
 .-compact #body { layout: vertical; }
-.-compact #dialogue, .-compact #session { width: 1fr; height: 1fr; }
+.-compact #dialogue, .-compact #session { width: 1fr; height: 1fr; margin-right: 0; }
 
 ModalScreen { align: center middle; }
 .modal {
     width: 70%; max-width: 80; height: auto; max-height: 80%;
-    background: $surface; padding: 1 2;
+    background: $surface; border: round $ttmj-border; padding: 1 2;
 }
 .modal-help { color: $foreground; padding: 0 1; height: auto; }
-.modal-keys { color: $ttmj-gray; padding: 1 1 0 1; height: auto; }
+.modal-keys { color: $ttmj-gray-dim; padding: 1 1 0 1; height: auto; }
 #picker { height: auto; max-height: 16; background: $surface; }
 #prompt-input { margin: 1 0; }
+
+Footer { background: $panel; color: $ttmj-gray-dim; }
+Footer > .footer-key--key { color: $accent; text-style: bold; }
+Footer > .footer-key--description { color: $ttmj-gray; }
 """
 
 
@@ -587,20 +564,20 @@ class TalkToMeApp(App[None]):
     def compose(self) -> ComposeResult:
         with Container(id="header"):
             yield HeaderBand(id="band")
-            with Horizontal(id="header-meta"):
-                yield Static("READY", id="phase", classes="pill")
+            with Horizontal(id="statusbar"):
+                yield Static("● READY", id="phase")
                 yield Static("", id="mode-chip", classes="chip")
                 yield Static("", id="voice-chip", classes="chip")
-                yield Static("", id="source-chip", classes="chip")
                 yield Static("", id="wake-chip", classes="chip")
-        with Container(id="signal", classes="panel"):
-            yield Sparkline(list(self._levels), summary_function=max, id="vu")
+                yield Static("", id="source-chip", classes="chip")
+                yield Static("", id="tier-chip", classes="chip")
+        yield Sparkline(list(self._levels), summary_function=max, id="vu")
         yield Static("", id="status", classes="status")
         with Horizontal(id="body"):
             yield RichLog(id="dialogue", classes="panel", markup=False, wrap=True,
-                          max_lines=500, auto_scroll=True)
+                          min_width=20, max_lines=500, auto_scroll=True)
             yield RichLog(id="session", classes="panel", markup=False, wrap=True,
-                          max_lines=1000, auto_scroll=True)
+                          min_width=20, max_lines=1000, auto_scroll=True)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -616,7 +593,6 @@ class TalkToMeApp(App[None]):
         )
         self.remote = config.remote()
         self.remote_cwd = config.remote_cwd()
-        self.query_one("#signal").border_title = "SIGNAL"
         self.query_one("#dialogue").border_title = "DIALOGUE"
         session = self.query_one("#session", RichLog)
         session.border_title = "SESSION"
@@ -637,7 +613,7 @@ class TalkToMeApp(App[None]):
         label = _PHASE_LABELS.get(phase, phase.upper())
         pill = self.query_one("#phase", Static)
         status = self.query_one("#status", Static)
-        pill.update(label)
+        pill.update(f"● {label}")
         for known in _PHASE_LABELS:
             pill.remove_class(f"-{known}")
             status.remove_class(f"-{known}")
@@ -646,12 +622,13 @@ class TalkToMeApp(App[None]):
 
     def _paint_chips(self) -> None:
         self.query_one("#mode-chip", Static).update(
-            f"MODE {_MODE_LABELS.get(self.mode, self.mode)}"
+            _MODE_LABELS.get(self.mode, self.mode).upper()
         )
         self.query_one("#voice-chip", Static).update(
             "VOICE ON" if self.voice_enabled else "VOICE MUTED"
         )
-        self.query_one("#source-chip", Static).update(f"SRC {self._source()}")
+        src = "LOCAL" if self.remote is None else self.remote.upper()
+        self.query_one("#source-chip", Static).update(src)
         if not self.wake_enabled:
             wake_label = "WAKE OFF"
         elif self.wake_unavailable:
@@ -666,8 +643,9 @@ class TalkToMeApp(App[None]):
         self.query_one("#status", Static).update(self.notice)
 
     def _paint_tier(self) -> None:
-        title = "SIGNAL" if not self.tier else f"SIGNAL — STT {self.tier}"
-        self.query_one("#signal").border_title = title
+        self.query_one("#tier-chip", Static).update(
+            f"STT {self.tier}".upper() if self.tier else ""
+        )
 
     def _source(self) -> str:
         if self.remote is None:
