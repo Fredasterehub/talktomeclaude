@@ -1,0 +1,18 @@
+{
+  "type": "system",
+  "subtype": "init",
+  "session_id": "b3d8f1c2-6a94-4e7b-9c1d-5f2a7e8b4c10",
+  "cwd": "/home/dev/project",
+  "model": "claude-opus-4",
+  "tools": ["Bash", "Read", "Edit"],
+  "permissionMode": "default",
+  "slash_commands": ["model", "help", "clear", "compact"],
+  "skills": [
+    {
+      "name": "kiln-fire",
+      "namespace": "kiln",
+      "description": "Launch or resume the Kiln software-creation pipeline.",
+      "read_only": false
+    }
+  ]
+}

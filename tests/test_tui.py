@@ -46,6 +46,13 @@ class TalkToMeAppTests(_ConfigIsolation):
             band = app.query_one("#band", tui.HeaderBand)
             self.assertIn("TALK TO ME, CLAUDE", band.render().plain)
 
+    async def test_wake_chip_present(self) -> None:
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chip = app.query_one("#wake-chip", tui.Static)
+            self.assertIn("WAKE", chip.render().plain)
+
     async def test_reduced_motion_disables_animation(self) -> None:
         with mock.patch.dict(os.environ, {"TALKTOMECLAUDE_REDUCED_MOTION": "1"}):
             app = TalkToMeApp(lambda _text: None)
@@ -164,6 +171,38 @@ class VoiceBridgeTests(_ConfigIsolation):
                 )
                 self.assertIn("Grep", lines)
                 self.assertIn("session · opus", lines)
+
+    async def test_bridge_threads_permission_and_records_session(self) -> None:
+        from talktomeclaude import config
+
+        config.set_claude_permissions("skip")
+        seen: dict = {}
+
+        def fake(**kwargs):
+            seen.update(kwargs)
+            kwargs["on_session"]("session-abc-123")
+
+        with mock.patch.object(tui, "run_listen", fake):
+            app = TalkToMeApp(lambda _text: None)
+            async with app.run_test(size=(100, 30)) as pilot:
+                await pilot.pause()
+                await pilot.press("space")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                self.assertEqual(app.current_session_id, "session-abc-123")
+        self.assertEqual(seen.get("permission"), "skip")
+
+    async def test_wake_key_toggles_and_persists(self) -> None:
+        from talktomeclaude import config
+
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            start = app.wake_enabled
+            await pilot.press("w")
+            await pilot.pause()
+            self.assertNotEqual(app.wake_enabled, start)
+            self.assertEqual(config.wake_word_enabled(), app.wake_enabled)
 
     async def test_escape_stops_a_running_session(self) -> None:
         def fake(**kwargs):

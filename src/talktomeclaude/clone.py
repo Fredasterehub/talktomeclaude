@@ -31,6 +31,21 @@ class CloneError(TTSError):
     """Raised when voice cloning cannot proceed."""
 
 
+def ytdlp_command(url: str, dest: str) -> list[str]:
+    """Build the yt-dlp argv for downloading a YouTube reference audio source."""
+    return [
+        "yt-dlp",
+        "--no-playlist",
+        "--format",
+        "bestaudio[ext=m4a]/bestaudio",
+        "--extractor-args",
+        "youtube:player_client=android_vr,web,tv",
+        "--output",
+        dest,
+        url,
+    ]
+
+
 def clone_cache_dir() -> Path:
     override = os.environ.get("TALKTOMECLAUDE_CLONE_CACHE")
     if override:

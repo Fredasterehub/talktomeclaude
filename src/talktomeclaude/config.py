@@ -13,6 +13,8 @@ _CONFIG_FILE = "config.json"
 
 RECORDING_MODES = ("always-on", "push-to-talk", "push-toggle")
 DEFAULT_RECORDING_MODE = "push-to-talk"
+DEFAULT_WAKE_PHRASE = "yo claude"
+CLAUDE_PERMISSIONS = ("off", "skip", "acceptEdits", "bypassPermissions")
 
 
 def config_dir() -> Path:
@@ -70,6 +72,35 @@ def set_recording_mode(mode: str) -> None:
     set_value("recording-mode", mode)
 
 
+def onboarding_version() -> int:
+    """The persisted onboarding version; zero means onboarding is incomplete."""
+    value = get_value("onboarding-version", 0)
+    return value if type(value) is int else 0
+
+
+def set_onboarding_version(version: int) -> None:
+    set_value("onboarding-version", version)
+
+
+def onboarding_needed(current: int) -> bool:
+    return onboarding_version() < current
+
+
+def claude_permissions() -> str:
+    """The persisted Claude Code permission posture; off is the safe default."""
+    value = load().get("claude-permissions")
+    return value if value in CLAUDE_PERMISSIONS else "off"
+
+
+def set_claude_permissions(value: str) -> None:
+    if value not in CLAUDE_PERMISSIONS:
+        raise ValueError(
+            f"unknown Claude permission posture {value!r}: expected one of "
+            f"{', '.join(CLAUDE_PERMISSIONS)}"
+        )
+    set_value("claude-permissions", value)
+
+
 def voice_assist_enabled() -> bool:
     """The full-mute switch the Stop hook consults before speaking."""
     return load().get("voice-assist", "on") == "on"
@@ -122,6 +153,52 @@ def barge_in_enabled() -> bool:
 
 def set_barge_in(enabled: bool) -> None:
     set_value("barge-in", "on" if enabled else "off")
+
+
+def wake_word_enabled() -> bool:
+    """Whether always-on listening waits for a wake word before recording."""
+    return load().get("wake-word", "off") == "on"
+
+
+def set_wake_word(enabled: bool) -> None:
+    set_value("wake-word", "on" if enabled else "off")
+
+
+def wake_phrase() -> str:
+    """The phrase associated with the user's configured wake-word model."""
+    value = load().get("wake-phrase")
+    return value if isinstance(value, str) and value.strip() else DEFAULT_WAKE_PHRASE
+
+
+def set_wake_phrase(value: str) -> None:
+    set_value("wake-phrase", value)
+
+
+def wake_model_path() -> str | None:
+    """Path to the trained wake-word model for the configured phrase, or None
+    when no detector model has been installed yet."""
+    value = load().get("wake-model")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def set_wake_model_path(value: str | None) -> None:
+    """Persist the wake-word model path, or clear it when empty."""
+    if value and value.strip():
+        set_value("wake-model", value.strip())
+    else:
+        settings = load()
+        settings.pop("wake-model", None)
+        save(settings)
+
+
+def onboarding_completed_at() -> str | None:
+    """ISO timestamp of the last completed onboarding run, or None."""
+    value = load().get("onboarding-completed-at")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def set_onboarding_completed_at(value: str) -> None:
+    set_value("onboarding-completed-at", value)
 
 
 def default_voice_name() -> str | None:

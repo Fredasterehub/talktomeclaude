@@ -46,6 +46,22 @@ class ConfigSettingsTests(unittest.TestCase):
         # Existing settings remain untouched.
         self.assertTrue(config.voice_assist_enabled())
 
+    def test_wake_word_defaults_off_with_default_phrase(self) -> None:
+        self.assertFalse(config.wake_word_enabled())
+        self.assertEqual(config.wake_phrase(), "yo claude")
+
+    def test_wake_word_toggle_round_trips(self) -> None:
+        config.set_wake_word(True)
+        self.assertTrue(config.wake_word_enabled())
+        config.set_wake_word(False)
+        self.assertFalse(config.wake_word_enabled())
+
+    def test_wake_phrase_round_trips(self) -> None:
+        config.set_wake_phrase("hey claude")
+        self.assertEqual(config.wake_phrase(), "hey claude")
+        config.set_wake_phrase("yo claude")
+        self.assertEqual(config.wake_phrase(), "yo claude")
+
 
 if __name__ == "__main__":
     unittest.main()

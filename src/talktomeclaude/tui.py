@@ -442,6 +442,12 @@ class Mirror(Message):
         super().__init__()
 
 
+class SessionChanged(Message):
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__()
+
+
 # ── live session-mirror formatting (stream-json events → styled lines) ────────
 _MIRROR_STYLES = {
     "mark": _OCHRE,
@@ -538,6 +544,8 @@ class TalkToMeApp(App[None]):
         Binding("p", "pick_project", "Project"),
         Binding("m", "mode", "Mode"),
         Binding("v", "voice", "Voice"),
+        Binding("w", "wake", "Wake"),
+        Binding("c", "clone", "Clone"),
         Binding("r", "remote", "Remote"),
         Binding("q", "quit", "Quit"),
     ]
@@ -548,6 +556,7 @@ class TalkToMeApp(App[None]):
     tier: reactive[str] = reactive("")
     mode: reactive[str] = reactive("always-on")
     voice_enabled: reactive[bool] = reactive(True)
+    wake_enabled: reactive[bool] = reactive(False)
     remote: reactive[str | None] = reactive(None)
     remote_cwd: reactive[str | None] = reactive(None)
 
@@ -563,6 +572,7 @@ class TalkToMeApp(App[None]):
         self._levels = [0.0] * 48
         self._compact: bool | None = None
         self._thinking_started = 0.0
+        self.current_session_id: str | None = None
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return {**super().get_theme_variable_defaults(), **_TTMJ_VARS}
@@ -575,6 +585,7 @@ class TalkToMeApp(App[None]):
                 yield Static("", id="mode-chip", classes="chip")
                 yield Static("", id="voice-chip", classes="chip")
                 yield Static("", id="source-chip", classes="chip")
+                yield Static("", id="wake-chip", classes="chip")
         with Container(id="signal", classes="panel"):
             yield Sparkline(list(self._levels), summary_function=max, id="vu")
         yield Static("", id="status", classes="status")
@@ -592,6 +603,7 @@ class TalkToMeApp(App[None]):
             self.animation_level = "none"
         self.mode = config.recording_mode()
         self.voice_enabled = config.voice_assist_enabled()
+        self.wake_enabled = config.wake_word_enabled()
         self.remote = config.remote()
         self.remote_cwd = config.remote_cwd()
         self.query_one("#signal").border_title = "SIGNAL"
@@ -630,6 +642,9 @@ class TalkToMeApp(App[None]):
             "VOICE ON" if self.voice_enabled else "VOICE MUTED"
         )
         self.query_one("#source-chip", Static).update(f"SRC {self._source()}")
+        self.query_one("#wake-chip", Static).update(
+            "WAKE ON" if self.wake_enabled else "WAKE OFF"
+        )
 
     def _paint_status(self) -> None:
         self.query_one("#status", Static).update(self.notice)
@@ -672,6 +687,10 @@ class TalkToMeApp(App[None]):
             self._paint_chips()
 
     def watch_voice_enabled(self, _enabled: bool) -> None:
+        if self._ui_ready:
+            self._paint_chips()
+
+    def watch_wake_enabled(self, _enabled: bool) -> None:
         if self._ui_ready:
             self._paint_chips()
 
@@ -759,10 +778,12 @@ class TalkToMeApp(App[None]):
                 on_phase=lambda phase: self.post_message(Phase(phase)),
                 on_progress=lambda: self.post_message(Progress()),
                 on_event=lambda event: self.post_message(Mirror(event)),
+                on_session=lambda session_id: self.post_message(SessionChanged(session_id)),
                 trigger_key=" ",
                 start_recording=self.mode == "push-toggle",
                 keys=self._keys,
                 stop_event=self._stop_event,
+                permission=config.claude_permissions(),
             )
         except KeyboardInterrupt:
             return
@@ -789,7 +810,9 @@ class TalkToMeApp(App[None]):
     def on_key(self, event) -> None:
         if not self._voice_running:
             return
-        if event.key in ("escape", "ctrl+c"):
+        # Escape stops; W stays live so wake gating can be toggled mid-session
+        # (the listen loop reads the setting before each hands-free capture).
+        if event.key in ("escape", "ctrl+c", "w"):
             return
         if self._keys is not None:
             self._keys.push(event.character or event.key)
@@ -833,6 +856,11 @@ class TalkToMeApp(App[None]):
         for style_key, text in _mirror_lines(message.event):
             log.write(Text(text, style=_MIRROR_STYLES.get(style_key, _CREAM)))
 
+    def on_session_changed(self, message: SessionChanged) -> None:
+        # The live session id every voice-fired command dispatches into.
+        self.current_session_id = message.session_id
+        self.query_one("#session").border_title = f"SESSION {message.session_id[:8]}"
+
     # ── actions: settings & navigation ───────────────────────────────────────
     def action_mode(self) -> None:
         if self._voice_running:
@@ -846,6 +874,29 @@ class TalkToMeApp(App[None]):
         self.voice_enabled = not self.voice_enabled
         config.set_voice_assist(self.voice_enabled)
         self.notice = "Spoken replies enabled" if self.voice_enabled else "Spoken replies muted"
+
+    def action_wake(self) -> None:
+        self.wake_enabled = not self.wake_enabled
+        config.set_wake_word(self.wake_enabled)
+        self.notice = (
+            "Wake word on — hands-free capture waits for the wake phrase"
+            if self.wake_enabled
+            else "Wake word off — hands-free capture starts immediately"
+        )
+
+    def action_clone(self) -> None:
+        if self._voice_running:
+            return
+        from talktomeclaude.clone_ui import CloneScreen
+
+        def _done(created: bool | None) -> None:
+            self.notice = (
+                "Voice created — select it with `config set default-voice NAME`"
+                if created
+                else "Voice cloning cancelled"
+            )
+
+        self.push_screen(CloneScreen(), _done)
 
     def action_remote(self) -> None:
         if self._voice_running:

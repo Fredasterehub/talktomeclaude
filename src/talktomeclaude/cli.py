@@ -19,7 +19,32 @@ from talktomeclaude.tts import (
 def main(ctx: click.Context) -> None:
     """Use voice as a medium for Claude Code."""
     if ctx.invoked_subcommand is None:
+        from talktomeclaude import config, onboarding
+
+        if config.onboarding_needed(onboarding.CURRENT_ONBOARDING_VERSION):
+            onboarding.run_onboarding()
         _launch_dashboard()
+
+
+@main.command()
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Reset the stored onboarding version and run setup again.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Force the onboarding wizard to run even when setup is current.",
+)
+def setup(reset: bool, force: bool) -> None:
+    """Run setup, with reset and force options for onboarding re-entry."""
+    from talktomeclaude import config, onboarding
+
+    if reset:
+        config.set_onboarding_version(0)
+    if reset or force or config.onboarding_needed(onboarding.CURRENT_ONBOARDING_VERSION):
+        onboarding.run_onboarding()
 
 
 @main.command()
@@ -437,6 +462,13 @@ def filter_command(transcript) -> None:
     default=None,
     help="Override the Whisper model for the active tier (e.g. large-v3, small.en).",
 )
+@click.option(
+    "--permission",
+    type=click.Choice(["off", "skip", "acceptEdits", "bypassPermissions"]),
+    default=None,
+    help="Claude Code permission posture for this run; persist it with "
+    "`config set claude-permissions`.",
+)
 @click.option("--once", is_flag=True, help="Handle a single utterance, then exit.")
 def listen(
     mode: str | None,
@@ -446,6 +478,7 @@ def listen(
     remote_cwd: str | None,
     device: str,
     model_name: str | None,
+    permission: str | None,
     once: bool,
 ) -> None:
     """Listen to the microphone and drive Claude Code by voice.
@@ -471,6 +504,7 @@ def listen(
     from talktomeclaude.listen import ListenError, run_listen
 
     active_mode = mode or config.recording_mode()
+    active_permission = permission or config.claude_permissions()
     active_remote = remote or config.remote()
     if remote_cwd is not None and not active_remote:
         raise click.ClickException("--remote-cwd requires --remote or a persisted remote")
@@ -491,6 +525,7 @@ def listen(
             status=lambda message: click.echo(message, err=True),
             remote=active_remote,
             remote_cwd=active_remote_cwd,
+            permission=active_permission,
         )
     except ListenError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -512,7 +547,10 @@ def config_set(key: str, value: str) -> None:
     Known keys: recording-mode (always-on, push-to-talk, push-toggle),
     voice-assist (on, off), remote (user@host, or "local"/"none" to clear),
     remote-cwd (remote project path, or "home"/"none" to clear),
-    barge-in (on, off), and default-voice (a voice name, or "auto"/"none" to clear).
+    barge-in (on, off), claude-permissions (off, skip, acceptEdits,
+    bypassPermissions), wake-word (on, off), wake-phrase (the spoken phrase),
+    wake-model (path to a trained wake-word model, or "none" to clear),
+    and default-voice (a voice name, or "auto"/"none" to clear).
     """
     from talktomeclaude import config as settings
 
@@ -539,6 +577,23 @@ def config_set(key: str, value: str) -> None:
                 f"invalid barge-in value {value!r}: expected on or off"
             )
         settings.set_barge_in(value == "on")
+    elif key == "claude-permissions":
+        try:
+            settings.set_claude_permissions(value)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+    elif key == "wake-word":
+        if value not in ("on", "off"):
+            raise click.ClickException(
+                f"invalid wake-word value {value!r}: expected on or off"
+            )
+        settings.set_wake_word(value == "on")
+    elif key == "wake-phrase":
+        settings.set_wake_phrase(value)
+    elif key == "wake-model":
+        settings.set_wake_model_path(
+            None if value.lower() in ("", "none", "off") else value
+        )
     elif key == "default-voice":
         settings.set_default_voice(
             None if value.lower() in ("", "auto", "none", "default") else value
@@ -546,7 +601,8 @@ def config_set(key: str, value: str) -> None:
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
-            "remote-cwd, barge-in, or default-voice"
+            "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
+            "wake-model, or default-voice"
         )
     click.echo(f"{key} = {value}")
 
@@ -567,12 +623,21 @@ def config_get(key: str) -> None:
         click.echo(settings.remote_cwd() or "home")
     elif key == "barge-in":
         click.echo("on" if settings.barge_in_enabled() else "off")
+    elif key == "claude-permissions":
+        click.echo(settings.claude_permissions())
+    elif key == "wake-word":
+        click.echo("on" if settings.wake_word_enabled() else "off")
+    elif key == "wake-phrase":
+        click.echo(settings.wake_phrase())
+    elif key == "wake-model":
+        click.echo(settings.wake_model_path() or "none")
     elif key == "default-voice":
         click.echo(settings.default_voice_name() or "auto")
     else:
         raise click.ClickException(
             f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
-            "remote-cwd, barge-in, or default-voice"
+            "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
+            "wake-model, or default-voice"
         )
 
 

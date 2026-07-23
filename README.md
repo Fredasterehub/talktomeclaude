@@ -46,6 +46,9 @@ recording modes. One local command.
 - **Answer back** — speaks Claude's actual dialogue in a real voice, and *only* the dialogue. Tool calls, fenced code, and thinking are stripped out.
 - **Ride Claude Code** — a plugin Stop hook speaks each reply automatically. Async, non-blocking, fails silent.
 - **Three recording modes, cross-platform** — `always-on` (hands-free, pause-gated), `push-to-talk` (hold a key), and `push-toggle` (tap to start, tap to send) work in native Windows Terminal and POSIX terminals without an extra keyboard package.
+- **First-run setup** — the first `talktomeclaude` launch opens a keyboard-driven setup screen that chooses your recording mode and Claude permission posture in one pass.
+- **An opt-in wake word** — always-on listening can wait for a wake phrase before it starts; it is off by default, and the dashboard always shows whether wake mode is on or off.
+- **Clone your own voice** — register a voice from an audio file or a fresh recording, with a mandatory audition before accepting any automatically selected reference clip.
 - **A real mute** — `assist off` and the whole thing goes quiet, hook included.
 - **Ship silent-proof** — three public-domain voices, fetched automatically on first use, so day one is never a robot.
 
@@ -321,18 +324,110 @@ To forget the saved project directory too, run
 | Command | What it does |
 |---|---|
 | `talktomeclaude` / `ui` | Open the interactive dashboard with live microphone signal, session state, voice controls, and a remote project picker. |
+| `setup [--reset] [--force]` | Re-run the first-run setup screen to choose `recording-mode` and `claude-permissions`. |
 | `speak "text"` | Synthesize and play a line locally. `--out file.wav` writes instead of plays; `--voice NAME` picks a voice. |
 | `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--remote-cwd PATH` to select its project directory, `--tmux-pane` to type into a live TUI. |
 | `transcribe FILE` | Local speech-to-text on an audio file. `--device auto\|cuda\|cpu`, `--show-tier` to see which model runs. |
 | `filter TRANSCRIPT.jsonl` | Print only Claude's spoken dialogue from a transcript (`-` for stdin) — the core "dialogue, never code" filter. |
 | `voices` | List the voices, their licenses, and which is the default for your hardware. `--download` pre-fetches them all. |
-| `config set KEY VALUE` / `config get KEY` | Persist or read settings. Keys: `recording-mode`, `voice-assist`, `remote` (`user@host`, or `local` to clear), `remote-cwd` (server path, or `home` to clear). |
+| `voice create NAME (--reference PATH \| --record SECONDS) [--sample/--no-sample] [--sample-text TEXT] [--play] [--set-default]` | Register a cloned voice from an existing reference file or a fresh recording using the optional cloning engine. |
+| `config set KEY VALUE` / `config get KEY` | Persist or read settings. Keys: `recording-mode`, `voice-assist`, `claude-permissions`, `remote` (`user@host`, or `local` to clear), `remote-cwd` (server path, or `home` to clear), `barge-in`, `wake-word`, `wake-phrase`, `wake-model`, `default-voice`. |
 | `assist on\|off\|status` | The full mute switch. `off` silences the Stop hook and all spoken replies. |
+
+**First-run onboarding** — the first bare `talktomeclaude` invocation opens the
+keyboard-driven setup screen automatically. Press Enter on the first pane to
+take the recommended defaults and finish immediately, or choose *Customize*
+to walk the guided sequence: hardware check, where Claude runs (local or
+remote SSH), first voice (with a route into voice cloning when your hardware
+carries it), spoken replies, recording mode, the optional wake word, and the
+Claude permission posture. Every pane is skippable (`S`), `B` goes back, and
+each choice is saved the moment it is made. Subcommands are never held behind
+onboarding. Run it again whenever you need it:
+```bash
+talktomeclaude setup
+talktomeclaude setup --reset
+talktomeclaude setup --force
+```
 
 **Recording modes** — set your default once:
 ```bash
 talktomeclaude config set recording-mode push-to-talk   # or always-on, push-toggle
 ```
+
+**Wake word** — wake-word gating is opt-in and off by default. When enabled, a
+hands-free (`always-on`) session waits for your wake phrase before it starts
+recording, then plays a short local greeting and listens. Configure it like any
+other setting:
+```bash
+talktomeclaude config set wake-word on          # or off (the default)
+talktomeclaude config set wake-phrase "yo claude"
+talktomeclaude config set wake-model /path/to/yo-claude.onnx
+```
+The detector is a local openWakeWord model trained for your phrase (an
+optional install — nothing phones home). If wake mode is on but the model or
+the detector runtime is missing, listening degrades to ungated capture and
+tells you why — it never fails silently. In the dashboard, press `W` to toggle
+wake mode (even mid-session); the `WAKE ON` / `WAKE OFF` chip always shows the
+current state.
+
+**Voice-activated commands** — the dashboard's voice session discovers the
+fireable commands your Claude session advertises (custom slash commands,
+skills, and plugin commands — built-in interactive commands are excluded) and
+lets you fire them by voice into the *same* live session:
+
+1. Say a command name exactly (for example, "kiln-fire") — it resolves
+   instantly with no model round-trip — or say "command …" / "run command …"
+   followed by what you want; that request is classified by an isolated,
+   throwaway `claude -p` sub-call that never touches your working session.
+2. talktomeclaude reads the command back: *"Firing /kiln-fire. Say go, or
+   cancel."*
+3. Say **go** to fire it, or **cancel** to drop it. Anything else is treated
+   as ordinary conversation. The fired command runs as the next turn of the
+   same resumed session, under your configured `claude-permissions` posture,
+   and its per-command fire count is persisted in `command_catalog.json`
+   alongside your enabled/favorite flags.
+
+Keyboard fallback: every command can always be typed as `/command` directly in
+Claude Code, or sent through `talktomeclaude listen` — the voice path never
+replaces the keyboard path.
+
+**Gradual spoken replies** — long answers are delivered in chunks (one idea at
+a time), and the microphone reopens between chunks. At any checkpoint you can
+say one of the eight feedback verbs — `continue`, `repeat`, `back`, `skip`,
+`stop`, `slower`, `expand`, `steer` — or just start talking: ordinary speech at
+a checkpoint becomes the next turn of the same session. The delivery position
+(cursor, heading, status) persists per session in
+`.omc/state/sessions/<session-id>/voice-conveyance.json`. With `barge-in` set
+to `on` *and* headphones detected, you can also interrupt playback simply by
+speaking over it; without headphones it stays safely half-duplex.
+
+**Voice cloning** — clone a voice from the dashboard (`C`), from onboarding's
+first-voice step, or from the CLI:
+```bash
+talktomeclaude voice create my-voice --reference ./reference.wav --sample --play
+talktomeclaude voice create my-voice --record 15 --set-default
+```
+The clone screen offers three sources: an audio file on disk, a fresh
+microphone recording, or a YouTube link (own or consented content only) whose
+reference segment is cut automatically. Every automatically selected segment
+must be auditioned and explicitly confirmed before any voice is created — no
+unattended cloning. The optional cloning engine must be installed for
+synthesis (`talktomeclaude doctor` prints the recipe); registration works
+either way.
+
+**Claude permissions** — the default posture is `off`, so talktomeclaude adds no
+permission flag to the Claude command it builds. Set or inspect it like the
+other persisted settings:
+```bash
+talktomeclaude config set claude-permissions off
+talktomeclaude config set claude-permissions skip
+talktomeclaude config set claude-permissions acceptEdits
+talktomeclaude config set claude-permissions bypassPermissions
+talktomeclaude config get claude-permissions
+```
+`skip` adds `--dangerously-skip-permissions`; `acceptEdits` and
+`bypassPermissions` add `--permission-mode acceptEdits` and
+`--permission-mode bypassPermissions`, respectively.
 
 **The Stop-hook path** (what the plugin wires up automatically): when Claude finishes a turn, the hook reads the event, pulls Claude's final message, strips it to dialogue, and speaks it — unless `assist` is `off`. It never blocks Claude Code and exits cleanly on any failure.
 

@@ -30,7 +30,7 @@ from typing import Mapping
 from talktomeclaude.catalog import BUNDLED_VOICE_NAMES
 from talktomeclaude.config import config_dir
 
-ENGINES = ("piper", "clone")
+ENGINES = ("piper", "clone", "f5")
 _RESERVED = frozenset({"default", "none", "auto"})
 # A voice name is a JSON key, a CLI argument and the stem of a copied reference
 # file, so it is restricted to a filesystem- and shell-safe charset (validated
@@ -179,7 +179,7 @@ def _to_voice(name: str, record: dict) -> RegisteredVoice:
     raw_params = record.get("params")
     params = dict(raw_params) if isinstance(raw_params, dict) else {}
     # Storage keeps the reference by basename; runtime exposes the absolute path.
-    if engine == "clone" and isinstance(params.get("reference"), str):
+    if engine in {"clone", "f5"} and isinstance(params.get("reference"), str):
         params["reference"] = str(refs_dir() / Path(params["reference"]).name)
     return RegisteredVoice(
         name=name,
@@ -390,6 +390,54 @@ def add_clone(
     return _to_voice(name, record)
 
 
+def add_f5(
+    name: str,
+    reference_path: str | Path,
+    ref_text: str,
+    *,
+    language: str = "en",
+    license_name: str = "personal / non-distributed",
+    provenance: str = "F5 voice clone (timbre only)",
+) -> RegisteredVoice:
+    """Register an F5-TTS voice and its transcribed reference clip."""
+    data = _load_for_write()
+    _validate_new_name(name, data["voices"])
+    if not isinstance(ref_text, str) or not ref_text.strip():
+        raise RegistryError("F5 reference text must be a non-empty string")
+    reference = _resolve(reference_path)
+    if not reference.is_file():
+        raise RegistryError(f"reference clip not found: {reference}")
+    suffix = reference.suffix.lower()
+    if suffix not in _AUDIO_SUFFIXES:
+        raise RegistryError(
+            f"reference must be an audio file ({', '.join(sorted(_AUDIO_SUFFIXES))}); "
+            f"got {suffix or 'no extension'}"
+        )
+    stored = _safe_refs_dir() / f"{name}{suffix}"
+    _copy_into_refs(reference, stored)
+    record = {
+        "engine": "f5",
+        "params": {
+            "reference": stored.name,
+            "ref_text": ref_text,
+        },
+        "language": language,
+        "license": license_name,
+        "provenance": provenance,
+    }
+    try:
+        data["voices"][name] = record
+        _save(data)
+    except Exception:
+        try:
+            if stored.is_file() and not stored.is_symlink():
+                stored.unlink()
+        except OSError:
+            pass
+        raise
+    return _to_voice(name, record)
+
+
 def remove(name: str) -> None:
     """Remove a registered voice. The registry entry is committed first; the
     copied clone clip (if any) is then deleted, and a cleanup failure is
@@ -399,7 +447,7 @@ def remove(name: str) -> None:
     if not isinstance(record, dict):
         raise RegistryError(f"no registered voice named {name!r}")
     reference_basename = None
-    if record.get("engine") == "clone" and isinstance(record.get("params"), dict):
+    if record.get("engine") in {"clone", "f5"} and isinstance(record.get("params"), dict):
         reference = record["params"].get("reference")
         if isinstance(reference, str):
             reference_basename = Path(reference).name  # defend against legacy absolute values
