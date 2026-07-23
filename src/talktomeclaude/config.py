@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 _CONFIG_FILE = "config.json"
+_NATIVE_PATH = type(Path())
 
 RECORDING_MODES = ("always-on", "push-to-talk", "push-toggle")
 DEFAULT_RECORDING_MODE = "push-to-talk"
@@ -23,13 +24,17 @@ COMMAND_NAMESPACE_POLICIES = ("allow-all", "ask-first-use", "allowlist")
 CLONE_RECIPE_CHOICES = ("shown", "later")
 
 
+class ConfigLoadError(RuntimeError):
+    pass
+
+
 def config_dir() -> Path:
     """Directory holding persistent state — identical in every environment."""
     override = os.environ.get("TALKTOMECLAUDE_CONFIG_DIR")
     if override:
-        return Path(override).expanduser()
+        return _NATIVE_PATH(override).expanduser()
     xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    base = _NATIVE_PATH(xdg).expanduser() if xdg else _NATIVE_PATH.home() / ".config"
     return base / "talktomeclaude"
 
 
@@ -37,13 +42,24 @@ def config_path() -> Path:
     return config_dir() / _CONFIG_FILE
 
 
-def load() -> dict:
+def _load_checked() -> dict:
     try:
         with config_path().open(encoding="utf-8") as handle:
             settings = json.load(handle)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return {}
-    return settings if isinstance(settings, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConfigLoadError(f"configuration is unreadable ({exc})") from exc
+    if not isinstance(settings, dict):
+        raise ConfigLoadError("configuration root must be an object")
+    return settings
+
+
+def load() -> dict:
+    try:
+        return _load_checked()
+    except ConfigLoadError:
+        return {}
 
 
 def save(settings: dict) -> None:
@@ -230,6 +246,15 @@ def set_barge_in(enabled: bool) -> None:
 def wake_word_enabled() -> bool:
     """Whether always-on listening waits for a wake word before recording."""
     return load().get("wake-word", "off") == "on"
+
+
+def wake_word_state() -> tuple[bool, bool]:
+    """Return (enabled, unavailable), failing closed on unreadable state."""
+    try:
+        settings = _load_checked()
+    except ConfigLoadError:
+        return True, True
+    return settings.get("wake-word", "off") == "on", False
 
 
 def set_wake_word(enabled: bool) -> None:

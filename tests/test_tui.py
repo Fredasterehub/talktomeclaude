@@ -61,7 +61,18 @@ class TalkToMeAppTests(_ConfigIsolation):
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             chip = app.query_one("#wake-chip", tui.Static)
-            self.assertEqual(chip.render().plain, "WAKE UNGATED")
+            self.assertEqual(chip.render().plain, "WAKE MANUAL")
+
+    async def test_unreadable_config_marks_wake_unavailable(self) -> None:
+        from talktomeclaude import config
+
+        config.config_path().parent.mkdir(parents=True, exist_ok=True)
+        config.config_path().write_text("{ broken", encoding="utf-8")
+        app = TalkToMeApp(lambda _text: None)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            chip = app.query_one("#wake-chip", tui.Static)
+            self.assertEqual(chip.render().plain, "WAKE UNAVAILABLE")
 
     async def test_wake_degraded_status_flips_the_chip_and_surfaces_why(self) -> None:
         from talktomeclaude import config
@@ -74,13 +85,13 @@ class TalkToMeAppTests(_ConfigIsolation):
             chip = app.query_one("#wake-chip", tui.Static)
             self.assertEqual(chip.render().plain, "WAKE ON")
             warning = (
-                "wake word degraded: no detector model is configured "
-                "(config set wake-model /path/to/model.onnx); listening ungated"
+                "wake word unavailable: corrupt detector; "
+                "manual push-to-talk required"
             )
             app.post_message(tui.Status(warning))
             await pilot.pause()
-            self.assertEqual(chip.render().plain, "WAKE UNGATED")
-            self.assertIn("ungated", app.notice)
+            self.assertEqual(chip.render().plain, "WAKE UNAVAILABLE")
+            self.assertIn("manual push-to-talk", app.notice)
 
     async def test_reduced_motion_disables_animation(self) -> None:
         with mock.patch.dict(os.environ, {"TALKTOMECLAUDE_REDUCED_MOTION": "1"}):

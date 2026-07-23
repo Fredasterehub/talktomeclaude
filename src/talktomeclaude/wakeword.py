@@ -61,16 +61,16 @@ def wait_for_wake_word(
     if timeout is not None and timeout < 0:
         raise ValueError("timeout must be non-negative")
 
-    model = _model_class()(wakeword_models=[str(model_path)])
-    sounddevice = _sounddevice()
     try:
-        import numpy
-    except ImportError as exc:
-        raise WakeWordUnavailable("wake-word detection needs numpy") from exc
+        model = _model_class()(wakeword_models=[str(model_path)])
+        sounddevice = _sounddevice()
+        try:
+            import numpy
+        except ImportError as exc:
+            raise WakeWordUnavailable("wake-word detection needs numpy") from exc
 
-    block_size = 1280  # 80 ms at the engine's required 16 kHz sample rate.
-    deadline = None if timeout is None else time.monotonic() + timeout
-    try:
+        block_size = 1280  # 80 ms at the engine's required 16 kHz sample rate.
+        deadline = None if timeout is None else time.monotonic() + timeout
         with sounddevice.RawInputStream(
             samplerate=16000,
             blocksize=block_size,

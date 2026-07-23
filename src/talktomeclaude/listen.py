@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+from enum import Enum
 from typing import Callable
 
 from talktomeclaude import command_catalog, config, conveyance, intent
@@ -189,6 +190,13 @@ def _resolve_command(
 
 
 # ── wake word, barge-in, and gradual conveyance ──────────────────────────────
+class WakeDisposition(Enum):
+    OFF_UNGATED = "off-ungated"
+    WAKE_GRANTED = "wake-granted"
+    MANUAL_FALLBACK = "manual-fallback"
+    STOP = "stop"
+
+
 def _setting(reader: Callable[[], object], default):
     """Read a persisted setting, degrading to *default* when the config store
     is unreachable (for example, no resolvable home directory)."""
@@ -203,24 +211,35 @@ def _wake_gate(
     status: Callable[[str], None],
     stop_event: "threading.Event | None",
     state: dict,
-) -> bool:
-    """Honor the opt-in wake word before a hands-free capture.
-
-    Returns False when the session is stopping. When wake mode is off, no
-    detector model is configured, or the optional wake-word runtime is
-    unavailable, capture stays ungated (reported once, never silent).
-    """
-    if not _setting(config.wake_word_enabled, False) or state.get("degraded"):
-        return True
+) -> WakeDisposition:
+    """Resolve wake gating without ever opening a failed gate."""
+    if stop_event is not None and stop_event.is_set():
+        return WakeDisposition.STOP
+    try:
+        enabled, unavailable = config.wake_word_state()
+    except Exception:
+        enabled, unavailable = True, True
+    if unavailable:
+        if not state.get("degraded"):
+            state["degraded"] = True
+            status(
+                "wake word unavailable: configuration is unreadable; "
+                "manual push-to-talk required"
+            )
+        return WakeDisposition.MANUAL_FALLBACK
+    if not enabled:
+        return WakeDisposition.OFF_UNGATED
+    if state.get("degraded"):
+        return WakeDisposition.MANUAL_FALLBACK
     model_path = _setting(config.wake_model_path, None)
     phrase = _setting(config.wake_phrase, config.DEFAULT_WAKE_PHRASE)
     if not model_path:
         state["degraded"] = True
         status(
-            "wake word degraded: no detector model is configured "
-            "(config set wake-model /path/to/model.onnx); listening ungated"
+            "wake word manual fallback: no detector model is configured "
+            "(config set wake-model /path/to/model.onnx); push-to-talk required"
         )
-        return True
+        return WakeDisposition.MANUAL_FALLBACK
     from talktomeclaude import wakeword
 
     status(f"waiting for the wake phrase {phrase!r}")
@@ -230,12 +249,12 @@ def _wake_gate(
         )
     except wakeword.WakeWordError as exc:
         state["degraded"] = True
-        status(f"wake word degraded: {exc}; listening ungated")
-        return True
+        status(f"wake word unavailable: {exc}; manual push-to-talk required")
+        return WakeDisposition.MANUAL_FALLBACK
     if heard is None:
-        return False  # stopping
+        return WakeDisposition.STOP
     speak(WAKE_GREETING)  # local canned greeting — never a Claude round-trip
-    return True
+    return WakeDisposition.WAKE_GRANTED
 
 
 def headphones_present() -> bool:
@@ -1198,12 +1217,28 @@ def run_listen(
     stream_events = handle_event if on_event is not None else None
 
     def capture():
-        nonlocal first_capture
+        nonlocal first_capture, keys
         set_phase("ready")
         recording = lambda: set_phase("recording")
         if mode == "always-on":
-            if not _wake_gate(speak, status, stop_event, wake_state):
+            disposition = _wake_gate(speak, status, stop_event, wake_state)
+            if disposition is WakeDisposition.STOP:
                 return None
+            if disposition is WakeDisposition.MANUAL_FALLBACK:
+                if keys is None:
+                    try:
+                        keys = _RawKeys()
+                    except ListenError as exc:
+                        raise ListenError(
+                            "wake-word manual fallback needs an interactive terminal"
+                        ) from exc
+                with keys:
+                    return _record_push_to_talk(
+                        keys,
+                        trigger_key=trigger_key,
+                        on_level=on_level,
+                        on_recording=recording,
+                    )
             return _record_always_on(
                 on_level=on_level, on_recording=recording, stop_event=stop_event
             )

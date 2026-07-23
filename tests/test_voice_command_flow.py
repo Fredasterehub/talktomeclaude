@@ -3,6 +3,7 @@ gating, the conveyance checkpoint loop, and barge-in playback selection."""
 
 from __future__ import annotations
 
+import importlib
 import os
 import tempfile
 import threading
@@ -152,12 +153,125 @@ class WakeGateTests(_Isolated):
             self._run_once(spoken)
         self.assertNotIn(listen.WAKE_GREETING, spoken)
 
-    def test_missing_model_degrades_to_ungated_capture(self) -> None:
+    def test_each_wake_gate_disposition(self) -> None:
+        statuses: list[str] = []
+        spoken: list[str] = []
+
+        config.set_wake_word(False)
+        self.assertIs(
+            listen._wake_gate(spoken.append, statuses.append, None, {}),
+            listen.WakeDisposition.OFF_UNGATED,
+        )
+
         config.set_wake_word(True)
         config.set_wake_model_path(None)
-        spoken: list[str] = []
-        self._run_once(spoken)  # must not raise or hang
-        self.assertNotIn(listen.WAKE_GREETING, spoken)
+        self.assertIs(
+            listen._wake_gate(spoken.append, statuses.append, None, {}),
+            listen.WakeDisposition.MANUAL_FALLBACK,
+        )
+
+        config.set_wake_model_path("/models/yo-claude.onnx")
+        with mock.patch(
+            "talktomeclaude.wakeword.wait_for_wake_word", return_value="yo claude"
+        ):
+            self.assertIs(
+                listen._wake_gate(spoken.append, statuses.append, None, {}),
+                listen.WakeDisposition.WAKE_GRANTED,
+            )
+        self.assertIn(listen.WAKE_GREETING, spoken)
+
+        stop_event = threading.Event()
+        stop_event.set()
+        self.assertIs(
+            listen._wake_gate(spoken.append, statuses.append, stop_event, {}),
+            listen.WakeDisposition.STOP,
+        )
+
+    def test_missing_model_routes_to_manual_push_to_talk(self) -> None:
+        config.set_wake_word(True)
+        config.set_wake_model_path(None)
+        keys = mock.MagicMock()
+        keys.__enter__.return_value = keys
+        transcriber = mock.Mock()
+        transcriber.transcribe.return_value = "hello"
+        with mock.patch.object(
+            listen, "_record_always_on", side_effect=AssertionError("must stay gated")
+        ), mock.patch.object(
+            listen, "_record_push_to_talk", return_value=object()
+        ) as manual, mock.patch.object(
+            listen, "UtteranceTranscriber", return_value=transcriber
+        ), mock.patch.object(
+            listen, "_prompt_claude", return_value=("ok", "s1")
+        ):
+            listen.run_listen(
+                mode="always-on",
+                session_id=None,
+                tmux_pane=None,
+                device="cpu",
+                model=None,
+                once=True,
+                echo=lambda _line: None,
+                speak=lambda _line: None,
+                status=lambda _line: None,
+                keys=keys,
+            )
+
+        manual.assert_called_once()
+
+    def test_manual_fallback_requires_an_interactive_cli(self) -> None:
+        config.set_wake_word(True)
+        config.set_wake_model_path(None)
+        with mock.patch.object(
+            listen.sys.stdin, "isatty", return_value=False
+        ), mock.patch.object(
+            listen, "UtteranceTranscriber", return_value=mock.Mock()
+        ), mock.patch.object(
+            listen, "_record_always_on", side_effect=AssertionError("must stay gated")
+        ):
+            with self.assertRaisesRegex(listen.ListenError, "interactive terminal"):
+                listen.run_listen(
+                    mode="always-on",
+                    session_id=None,
+                    tmux_pane=None,
+                    device="cpu",
+                    model=None,
+                    once=True,
+                    echo=lambda _line: None,
+                    speak=lambda _line: None,
+                    status=lambda _line: None,
+                )
+
+    def test_detector_degradation_stays_manual_and_notices_once(self) -> None:
+        wakeword = importlib.import_module("talktomeclaude.wakeword")
+
+        config.set_wake_word(True)
+        config.set_wake_model_path("/models/corrupt.onnx")
+        statuses: list[str] = []
+        state: dict = {}
+        with mock.patch(
+            "talktomeclaude.wakeword.wait_for_wake_word",
+            side_effect=wakeword.WakeWordError("corrupt model"),
+        ) as detector:
+            first = listen._wake_gate(lambda _line: None, statuses.append, None, state)
+            second = listen._wake_gate(lambda _line: None, statuses.append, None, state)
+
+        self.assertIs(first, listen.WakeDisposition.MANUAL_FALLBACK)
+        self.assertIs(second, listen.WakeDisposition.MANUAL_FALLBACK)
+        detector.assert_called_once()
+        self.assertEqual(len(statuses), 2)  # waiting + one unavailable notice
+        self.assertIn("manual push-to-talk", statuses[-1])
+
+    def test_unreadable_config_fails_closed_for_wake_only(self) -> None:
+        config.config_path().write_bytes(b"\xff\xfe")
+        statuses: list[str] = []
+
+        disposition = listen._wake_gate(
+            lambda _line: None, statuses.append, None, {}
+        )
+
+        self.assertIs(disposition, listen.WakeDisposition.MANUAL_FALLBACK)
+        self.assertIn("unavailable", statuses[-1])
+        self.assertEqual(config.recording_mode(), config.DEFAULT_RECORDING_MODE)
 
 
 class ConveyanceDeliveryTests(_Isolated):

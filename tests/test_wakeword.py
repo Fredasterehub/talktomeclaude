@@ -26,6 +26,14 @@ class WakeWordModuleTests(unittest.TestCase):
             importlib.reload(module)
             self.assertEqual(module.DEFAULT_WAKE_PHRASE, "yo claude")
 
+    def test_corrupt_model_is_normalized_to_wakeword_error(self) -> None:
+        from talktomeclaude import wakeword
+
+        constructor = mock.Mock(side_effect=RuntimeError("corrupt ONNX"))
+        with mock.patch.object(wakeword, "_model_class", return_value=constructor):
+            with self.assertRaisesRegex(wakeword.WakeWordError, "corrupt ONNX"):
+                wakeword.wait_for_wake_word("/models/corrupt.onnx")
+
 
 if __name__ == "__main__":
     unittest.main()
