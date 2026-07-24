@@ -1,8 +1,10 @@
-"""Headless recovery presentation for the staged companion command."""
+"""Non-graphical recovery presentation for the production companion."""
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
+from typing import Protocol
 
 from talktomeclaude.companion.contracts import (
     CompanionIntent,
@@ -10,69 +12,172 @@ from talktomeclaude.companion.contracts import (
     IntentKind,
 )
 from talktomeclaude.companion.viewmodel import CompanionViewModel, to_view_model
-from talktomeclaude.core import EventKind, RuntimeCoordinator, RuntimeEvent
 
 
 class IntentUnavailableError(RuntimeError):
-    """Raised when the staged skeleton receives an unwired workflow intent."""
+    """A recovery presentation cannot expose the requested direct surface."""
+
+
+class ProductionController(Protocol):
+    @property
+    def snapshot(self) -> CompanionSnapshot: ...
+
+    def dispatch(self, intent: CompanionIntent) -> CompanionSnapshot: ...
+
+    def subscribe(
+        self, listener: Callable[[CompanionSnapshot], None]
+    ) -> Callable[[], None]: ...
+
+    def start_background(self) -> None: ...
 
 
 class HeadlessController:
-    """Minimal controller that can later be bound to the companion runtime.
+    """Focus-free adapter over the same controller used by the Tk shell."""
 
-    User workflow intents pass through the authoritative runtime coordinator.
-    This slice advances lifecycle state only; capture and delivery side effects
-    remain unwired and are never simulated.
-    """
+    _UNAVAILABLE_SURFACES = frozenset(
+        {
+            IntentKind.OPEN_SETTINGS,
+            IntentKind.OPEN_VOICE,
+            IntentKind.OPEN_REVIEW,
+            IntentKind.OPEN_DIAGNOSTICS,
+        }
+    )
 
-    _EVENTS = {
-        IntentKind.START_RECORDING: EventKind.START_RECORDING,
-        IntentKind.FINISH_RECORDING: EventKind.FINISH_RECORDING,
-        IntentKind.CANCEL: EventKind.CANCEL,
-        IntentKind.QUIT: EventKind.STOP_REQUESTED,
-    }
-
-    def __init__(
-        self,
-        runtime: RuntimeCoordinator | None = None,
-        *,
-        detail: str = "",
-    ) -> None:
-        self._runtime = runtime or RuntimeCoordinator()
-        self._detail = detail
+    def __init__(self, controller: ProductionController) -> None:
+        self._controller = controller
 
     @property
     def snapshot(self) -> CompanionSnapshot:
-        return CompanionSnapshot(self._runtime.state, self._detail)
+        return self._controller.snapshot
 
     def view_model(self) -> CompanionViewModel:
         return to_view_model(self.snapshot)
 
+    def subscribe(
+        self, listener: Callable[[CompanionSnapshot], None]
+    ) -> Callable[[], None]:
+        return self._controller.subscribe(listener)
+
+    def start_background(self) -> None:
+        self._controller.start_background()
+
     def dispatch(self, intent: CompanionIntent) -> CompanionSnapshot:
-        if intent.kind is IntentKind.STATUS:
-            return self.snapshot
-
-        event_kind = self._EVENTS.get(intent.kind)
-        if event_kind is None:
+        if intent.kind in self._UNAVAILABLE_SURFACES:
             raise IntentUnavailableError(
-                f"{intent.kind.value} is unavailable in the headless presentation"
+                f"{intent.kind.value} requires the desktop companion"
             )
+        return self._controller.dispatch(intent)
 
-        result = self._runtime.dispatch(RuntimeEvent(event_kind))
-        if not result.accepted:
-            raise IntentUnavailableError(
-                f"{intent.kind.value} is unavailable while {result.current.phase.value}"
-            )
-        return self.snapshot
+
+InputReader = Callable[[], str | None]
+OutputWriter = Callable[[str], object]
+
+
+def _read_stdin() -> str | None:
+    line = sys.stdin.readline()
+    return None if line == "" else line
+
+
+class HeadlessCompanionApplication:
+    """Host production state and workflow intents without a GUI or hotkey."""
+
+    _COMMANDS = {
+        "status": IntentKind.STATUS,
+        "start": IntentKind.START_RECORDING,
+        "finish": IntentKind.FINISH_RECORDING,
+        "cancel": IntentKind.CANCEL,
+        "mute": IntentKind.TOGGLE_OUTPUT_MUTE,
+        "quit": IntentKind.QUIT,
+        "exit": IntentKind.QUIT,
+    }
+    HELP = "Commands: status, start, finish, cancel, mute, quit"
+
+    def __init__(
+        self,
+        controller: HeadlessController,
+        *,
+        read: InputReader = _read_stdin,
+        write: OutputWriter = print,
+    ) -> None:
+        self._controller = controller
+        self._read = read
+        self._write = write
+        self._last_snapshot: CompanionSnapshot | None = None
+
+    def _render(self, snapshot: CompanionSnapshot, *, force: bool = False) -> None:
+        if not force and snapshot == self._last_snapshot:
+            return
+        self._last_snapshot = snapshot
+        view = to_view_model(snapshot)
+        detail = f" — {view.detail}" if view.detail else ""
+        muted = " [MUTED]" if snapshot.output_muted else ""
+        self._write(f"{view.cue}: {view.status}{muted}{detail}")
+
+    def _command(self, value: str) -> bool:
+        command = value.strip().casefold()
+        if not command:
+            return True
+        if command in {"help", "?"}:
+            self._write(self.HELP)
+            return True
+        kind = self._COMMANDS.get(command)
+        if kind is None:
+            self._write("ERROR: Unknown command")
+            return True
+        try:
+            snapshot = self._controller.dispatch(CompanionIntent(kind))
+        except Exception:
+            self._write("ERROR: Action unavailable")
+            return True
+        self._render(snapshot, force=kind is IntentKind.STATUS)
+        return kind is not IntentKind.QUIT
+
+    def run(self) -> int:
+        unsubscribe = self._controller.subscribe(self._render)
+        try:
+            self._controller.start_background()
+            self._render(self._controller.snapshot)
+            while True:
+                try:
+                    value = self._read()
+                except (EOFError, KeyboardInterrupt):
+                    break
+                if value is None or not self._command(value):
+                    break
+            return 0
+        finally:
+            unsubscribe()
+            try:
+                self._controller.dispatch(CompanionIntent(IntentKind.QUIT))
+            except Exception:
+                pass
 
 
 def run_headless(
-    write: Callable[[str], object] = print,
-    controller: HeadlessController | None = None,
+    write: OutputWriter = print,
+    controller: ProductionController | HeadlessController | None = None,
+    *,
+    read: InputReader = _read_stdin,
 ) -> int:
-    """Report the recovery controller state without starting an interactive UI."""
+    """Run the production controller through the non-graphical presentation."""
 
-    active = controller or HeadlessController()
-    view = active.view_model()
-    write(f"{view.cue}: {view.status}")
-    return 0
+    if controller is None:
+        # Keep production graph construction lazy: importing this module never
+        # opens audio, initializes speech, changes hooks, or imports Tk.
+        from talktomeclaude.companion.app import build_headless_controller
+
+        active = HeadlessController(build_headless_controller())
+    elif isinstance(controller, HeadlessController):
+        active = controller
+    else:
+        active = HeadlessController(controller)
+    return HeadlessCompanionApplication(active, read=read, write=write).run()
+
+
+__all__ = [
+    "HeadlessCompanionApplication",
+    "HeadlessController",
+    "IntentUnavailableError",
+    "ProductionController",
+    "run_headless",
+]

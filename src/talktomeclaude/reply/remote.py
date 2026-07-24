@@ -362,10 +362,16 @@ class RemoteSpoolStreamer:
 
 
 def _parser() -> argparse.ArgumentParser:
+    from talktomeclaude.config import config_dir
+
     parser = argparse.ArgumentParser(prog="talktomeclaude-reply-remote")
     subparsers = parser.add_subparsers(dest="command", required=True)
     stream = subparsers.add_parser("stream")
-    stream.add_argument("--spool-root", type=Path, required=True)
+    stream.add_argument(
+        "--spool-root",
+        type=Path,
+        default=config_dir() / "reply-spool",
+    )
     stream.add_argument("--poll-interval", type=float, default=0.1)
     return parser
 

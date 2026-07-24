@@ -20,7 +20,11 @@ class IntentKind(str, Enum):
     START_RECORDING = "start-recording"
     FINISH_RECORDING = "finish-recording"
     CANCEL = "cancel"
+    TOGGLE_OUTPUT_MUTE = "toggle-output-mute"
     OPEN_SETTINGS = "open-settings"
+    OPEN_VOICE = "open-voice"
+    OPEN_REVIEW = "open-review"
+    OPEN_DIAGNOSTICS = "open-diagnostics"
     QUIT = "quit"
 
 
@@ -29,6 +33,17 @@ class CompanionIntent:
     """A presentation-neutral request from a user-facing controller."""
 
     kind: IntentKind
+    allow_focus: bool = False
+
+    def __post_init__(self) -> None:
+        focusable = {
+            IntentKind.OPEN_SETTINGS,
+            IntentKind.OPEN_VOICE,
+            IntentKind.OPEN_REVIEW,
+            IntentKind.OPEN_DIAGNOSTICS,
+        }
+        if self.allow_focus and self.kind not in focusable:
+            raise ValueError("workflow intents may not request focus")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,3 +52,4 @@ class CompanionSnapshot:
 
     runtime: RuntimeState
     detail: str = ""
+    output_muted: bool = False

@@ -18,6 +18,7 @@ _NATIVE_PATH = type(Path())
 
 RECORDING_MODES = ("always-on", "push-to-talk", "push-toggle")
 DEFAULT_RECORDING_MODE = "push-to-talk"
+DEFAULT_COMPANION_RECORDING_MODE = "push-toggle"
 DEFAULT_WAKE_PHRASE = "yo claude"
 CLAUDE_PERMISSIONS = ("off", "skip", "acceptEdits", "bypassPermissions")
 STT_DEVICES = ("auto", "cuda", "cpu")
@@ -104,6 +105,13 @@ def set_recording_mode(mode: str) -> None:
             f"unknown recording mode {mode!r}: expected one of {', '.join(RECORDING_MODES)}"
         )
     set_value("recording-mode", mode)
+
+
+def companion_recording_mode() -> str:
+    """Companion capture defaults to toggle without changing legacy listen."""
+
+    value = load().get("recording-mode")
+    return value if value in RECORDING_MODES else DEFAULT_COMPANION_RECORDING_MODE
 
 
 def stt_device() -> str:
@@ -206,6 +214,16 @@ def voice_assist_enabled() -> bool:
 
 def set_voice_assist(enabled: bool) -> None:
     set_value("voice-assist", "on" if enabled else "off")
+
+
+def assistant_auto_submit_enabled() -> bool:
+    """Whether acceptable assistant dictation sends exactly one Enter."""
+
+    return load().get("assistant-auto-submit", "on") == "on"
+
+
+def set_assistant_auto_submit(enabled: bool) -> None:
+    set_value("assistant-auto-submit", "on" if enabled else "off")
 
 
 def remote() -> str | None:

@@ -25,10 +25,12 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from collections.abc import Callable
+from typing import Mapping, TypeVar
 
 from talktomeclaude.catalog import BUNDLED_VOICE_NAMES
 from talktomeclaude.config import config_dir
+from talktomeclaude.storage import AtomicJsonTransaction, AtomicStorageError
 
 ENGINES = ("piper", "clone", "f5")
 _RESERVED = frozenset({"default", "none", "auto"})
@@ -51,6 +53,38 @@ _SCHEMA_VERSION = 1
 
 class RegistryError(RuntimeError):
     """Raised when a registry operation is invalid or a record is corrupt."""
+
+
+_Result = TypeVar("_Result")
+
+
+def _under_registry_lock(operation: Callable[[], _Result]) -> _Result:
+    """Serialize registry plus reference-asset mutations across processes."""
+
+    result: list[_Result] = []
+    callback_error: list[BaseException] = []
+    transaction = AtomicJsonTransaction(
+        config_dir() / ".voice-registry-guard.json",
+        purpose="voice-registry",
+    )
+
+    def run(state: dict) -> dict:
+        try:
+            result.append(operation())
+        except BaseException as exc:
+            callback_error.append(exc)
+            raise
+        return state
+
+    try:
+        transaction.update(run)
+    except RegistryError:
+        raise
+    except (OSError, AtomicStorageError) as exc:
+        if callback_error:
+            raise callback_error[0]
+        raise RegistryError("voice registry lock or transaction failed") from exc
+    return result[0]
 
 
 @dataclass(frozen=True)
@@ -175,7 +209,8 @@ def _save(data: dict) -> None:
 # Record <-> value object
 # --------------------------------------------------------------------------- #
 def _to_voice(name: str, record: dict) -> RegisteredVoice:
-    engine = record.get("engine") if isinstance(record.get("engine"), str) else ""
+    raw_engine = record.get("engine")
+    engine: str = raw_engine if isinstance(raw_engine, str) else ""
     raw_params = record.get("params")
     params = dict(raw_params) if isinstance(raw_params, dict) else {}
     # Storage keeps the reference by basename; runtime exposes the absolute path.
@@ -302,7 +337,7 @@ def _copy_into_refs(source: Path, destination: Path) -> None:
 # --------------------------------------------------------------------------- #
 # Mutations
 # --------------------------------------------------------------------------- #
-def add_piper(
+def _add_piper_unlocked(
     name: str,
     model_path: str | Path,
     config_path: str | Path | None = None,
@@ -337,7 +372,7 @@ def add_piper(
     return _to_voice(name, record)
 
 
-def add_clone(
+def _add_clone_unlocked(
     name: str,
     reference_path: str | Path,
     *,
@@ -390,7 +425,7 @@ def add_clone(
     return _to_voice(name, record)
 
 
-def add_f5(
+def _add_f5_unlocked(
     name: str,
     reference_path: str | Path,
     ref_text: str,
@@ -438,7 +473,7 @@ def add_f5(
     return _to_voice(name, record)
 
 
-def remove(name: str) -> None:
+def _remove_unlocked(name: str) -> None:
     """Remove a registered voice. The registry entry is committed first; the
     copied clone clip (if any) is then deleted, and a cleanup failure is
     reported so an orphaned personal clip cannot go unnoticed."""
@@ -470,3 +505,72 @@ def remove(name: str) -> None:
                 f"voice {name!r} was removed, but its reference clip {stored} could not "
                 f"be deleted ({exc}); please remove it by hand"
             ) from exc
+
+
+def add_piper(
+    name: str,
+    model_path: str | Path,
+    config_path: str | Path | None = None,
+    *,
+    language: str = "",
+    license_name: str = "user-supplied",
+    provenance: str = "user-supplied Piper voice",
+) -> RegisteredVoice:
+    return _under_registry_lock(
+        lambda: _add_piper_unlocked(
+            name,
+            model_path,
+            config_path,
+            language=language,
+            license_name=license_name,
+            provenance=provenance,
+        )
+    )
+
+
+def add_clone(
+    name: str,
+    reference_path: str | Path,
+    *,
+    language: str = "en",
+    license_name: str = "personal / non-distributed",
+    provenance: str = "voice clone (timbre only)",
+    exaggeration: float = 0.5,
+    cfg_weight: float = 0.5,
+) -> RegisteredVoice:
+    return _under_registry_lock(
+        lambda: _add_clone_unlocked(
+            name,
+            reference_path,
+            language=language,
+            license_name=license_name,
+            provenance=provenance,
+            exaggeration=exaggeration,
+            cfg_weight=cfg_weight,
+        )
+    )
+
+
+def add_f5(
+    name: str,
+    reference_path: str | Path,
+    ref_text: str,
+    *,
+    language: str = "en",
+    license_name: str = "personal / non-distributed",
+    provenance: str = "F5 voice clone (timbre only)",
+) -> RegisteredVoice:
+    return _under_registry_lock(
+        lambda: _add_f5_unlocked(
+            name,
+            reference_path,
+            ref_text,
+            language=language,
+            license_name=license_name,
+            provenance=provenance,
+        )
+    )
+
+
+def remove(name: str) -> None:
+    _under_registry_lock(lambda: _remove_unlocked(name))

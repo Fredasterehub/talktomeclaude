@@ -69,22 +69,24 @@ def speak(text: str, out_path: Path | None, voice_name: str | None) -> None:
     `voice create`) renders through the optional cloning engine.
     """
     playback = out_path is None
-    if playback:
-        out_path = _temporary_wav_path("talktomeclaude-")
+    target_path = out_path or _temporary_wav_path("talktomeclaude-")
     voice_name = _resolve_default_voice(voice_name)
     try:
         voice = synthesize(
-            text, out_path, voice_name, on_status=lambda message: click.echo(message, err=True)
+            text,
+            target_path,
+            voice_name,
+            on_status=lambda message: click.echo(message, err=True),
         )
     except TTSError as exc:
         raise click.ClickException(str(exc)) from exc
     if not playback:
-        click.echo(f"wrote {out_path} (voice: {voice.name})")
+        click.echo(f"wrote {target_path} (voice: {voice.name})")
         return
     try:
-        _play_wav(out_path)
+        _play_wav(target_path)
     finally:
-        out_path.unlink(missing_ok=True)
+        target_path.unlink(missing_ok=True)
 
 
 def _play_wav(path: Path) -> None:
@@ -172,14 +174,24 @@ def tui() -> None:
 )
 def companion(headless: bool) -> None:
     """Start the staged Windows companion."""
-    if not headless:
-        raise click.ClickException(
-            "the desktop companion is not connected yet; use --headless for recovery"
-        )
+    if headless:
+        from talktomeclaude.companion.headless import run_headless
 
-    from talktomeclaude.companion.headless import run_headless
+        try:
+            run_headless(click.echo)
+        except (OSError, RuntimeError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        return
 
-    run_headless(click.echo)
+    from talktomeclaude.companion.app import (
+        CompanionStartupError,
+        run_desktop_companion,
+    )
+
+    try:
+        run_desktop_companion()
+    except (CompanionStartupError, OSError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @main.group(invoke_without_command=True)
@@ -562,7 +574,8 @@ def config_set(key: str, value: str) -> None:
     """Persist KEY = VALUE.
 
     Known keys: recording-mode (always-on, push-to-talk, push-toggle),
-    voice-assist (on, off), remote (user@host, or "local"/"none" to clear),
+    voice-assist (on, off), assistant-auto-submit (on, off),
+    remote (user@host, or "local"/"none" to clear),
     remote-cwd (remote project path, or "home"/"none" to clear),
     barge-in (on, off), claude-permissions (off, skip, acceptEdits,
     bypassPermissions), wake-word (on, off), wake-phrase (the spoken phrase),
@@ -585,6 +598,12 @@ def config_set(key: str, value: str) -> None:
                 f"invalid voice-assist value {value!r}: expected on or off"
             )
         settings.set_voice_assist(value == "on")
+    elif key == "assistant-auto-submit":
+        if value not in ("on", "off"):
+            raise click.ClickException(
+                f"invalid assistant-auto-submit value {value!r}: expected on or off"
+            )
+        settings.set_assistant_auto_submit(value == "on")
     elif key == "remote":
         settings.set_remote(None if value.lower() in ("", "local", "none", "off") else value)
     elif key == "remote-cwd":
@@ -634,7 +653,8 @@ def config_set(key: str, value: str) -> None:
         )
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, "
+            "assistant-auto-submit, remote, "
             "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
             "wake-model, default-voice, stt-device, command-namespace-policy, "
             "or command-namespace-allowlist"
@@ -652,6 +672,8 @@ def config_get(key: str) -> None:
         click.echo(settings.recording_mode())
     elif key == "voice-assist":
         click.echo("on" if settings.voice_assist_enabled() else "off")
+    elif key == "assistant-auto-submit":
+        click.echo("on" if settings.assistant_auto_submit_enabled() else "off")
     elif key == "remote":
         click.echo(settings.remote() or "local")
     elif key == "remote-cwd":
@@ -676,7 +698,8 @@ def config_get(key: str) -> None:
         click.echo(", ".join(settings.command_namespace_allowlist()) or "none")
     else:
         raise click.ClickException(
-            f"unknown setting {key!r}: expected recording-mode, voice-assist, remote, "
+            f"unknown setting {key!r}: expected recording-mode, voice-assist, "
+            "assistant-auto-submit, remote, "
             "remote-cwd, barge-in, claude-permissions, wake-word, wake-phrase, "
             "wake-model, default-voice, stt-device, command-namespace-policy, "
             "or command-namespace-allowlist"
@@ -703,6 +726,56 @@ def assist(state: str) -> None:
 @main.group()
 def hook() -> None:
     """Entry points invoked by the Claude Code plugin hooks."""
+
+
+@hook.command("install")
+@click.option(
+    "--settings",
+    "settings_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Claude settings JSON path (defaults to ~/.claude/settings.json).",
+)
+def hook_install(settings_path: Path | None) -> None:
+    """Install the owned durable Stop hook without replacing other hooks."""
+
+    from talktomeclaude.assistant.hooks import ClaudeHookManager, HookSettingsError
+
+    target = settings_path or (Path.home() / ".claude" / "settings.json")
+    try:
+        inspection = ClaudeHookManager(target).install()
+    except HookSettingsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"companion Stop hook {inspection.status.value}")
+
+
+@hook.command("status")
+@click.option(
+    "--settings",
+    "settings_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+)
+def hook_status(settings_path: Path | None) -> None:
+    """Report only this companion's owned Stop-hook status."""
+
+    from talktomeclaude.assistant.hooks import ClaudeHookManager, HookSettingsError
+
+    target = settings_path or (Path.home() / ".claude" / "settings.json")
+    try:
+        inspection = ClaudeHookManager(target).inspect()
+    except HookSettingsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(inspection.status.value)
+
+
+@hook.command("stream", hidden=True)
+def hook_stream() -> None:
+    """Run the durable reply stream with this console script's Python."""
+
+    from talktomeclaude.reply.remote import main as run_remote_stream
+
+    raise SystemExit(run_remote_stream(["stream"]))
 
 
 @hook.command()

@@ -707,6 +707,61 @@ class CaptureDeliveryIntegrationTests(unittest.TestCase):
         self.assertNotIn("private", repr(result))
         self.assertNotIn("private", repr(result.diagnostics))
 
+    def test_cancel_returns_only_after_admitted_side_effect_boundary_settles(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+        cancel_returned = threading.Event()
+        effects: list[str] = []
+
+        class Injector:
+            def snapshot_target(self) -> object:
+                return EVIDENCE
+
+            def deliver(self, *_args, **_policy) -> DeliveryResult:
+                entered.set()
+                release.wait(1)
+                effects.append("paste")
+                return DeliveryResult(DeliveryCode.DELIVERED, pasted=True)
+
+        injector = Injector()
+        coordinator = CaptureDeliveryCoordinator(
+            CaptureService(
+                snapshot_resolver=SnapshotCallableAdapter(
+                    injector.snapshot_target
+                )
+            ),
+            injector,
+        )
+        coordinator.start()
+        coordinator.add_audio(b"audio")
+        delivery = threading.Thread(
+            target=lambda: coordinator.finish_toggle(
+                _factory(Transcription("private", 0.99), []),
+                mode=DeliveryMode.ASSISTANT,
+                auto_submit=True,
+                cancelled=cancelled.is_set,
+            )
+        )
+        delivery.start()
+        self.assertTrue(entered.wait(1))
+
+        def cancel() -> None:
+            cancelled.set()
+            coordinator.cancel()
+            effects.append("cancel_return")
+            cancel_returned.set()
+
+        cancellation = threading.Thread(target=cancel)
+        cancellation.start()
+        self.assertFalse(cancel_returned.wait(0.05))
+        release.set()
+        delivery.join(1)
+        cancellation.join(1)
+
+        self.assertTrue(cancel_returned.is_set())
+        self.assertEqual(effects, ["paste", "cancel_return"])
+
 
 class _SpyInjector:
     def __init__(
@@ -736,7 +791,9 @@ class _SpyInjector:
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: object = None,
     ) -> DeliveryResult:
+        del cancelled
         self.events.append("injector.deliver")
         self.deliveries.append((text, evidence, mode, auto_submit))
         return self.results.popleft()

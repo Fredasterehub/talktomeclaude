@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from talktomeclaude import config
@@ -116,6 +115,19 @@ class ConfigSettingsTests(unittest.TestCase):
                 self.assertFalse(config.voice_assist_enabled())
         config.set_voice_assist(True)
         self.assertTrue(config.voice_assist_enabled())
+
+    def test_companion_defaults_toggle_without_changing_legacy_default(self) -> None:
+        self.assertEqual(config.recording_mode(), "push-to-talk")
+        self.assertEqual(config.companion_recording_mode(), "push-toggle")
+        config.set_recording_mode("push-to-talk")
+        self.assertEqual(config.companion_recording_mode(), "push-to-talk")
+
+    def test_assistant_auto_submit_defaults_on_and_round_trips(self) -> None:
+        self.assertTrue(config.assistant_auto_submit_enabled())
+        config.set_assistant_auto_submit(False)
+        self.assertFalse(config.assistant_auto_submit_enabled())
+        config.set_assistant_auto_submit(True)
+        self.assertTrue(config.assistant_auto_submit_enabled())
 
 
 if __name__ == "__main__":

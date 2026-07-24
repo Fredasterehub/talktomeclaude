@@ -709,7 +709,7 @@ def lifecycle_measurement(key: str, cycles: int) -> tuple[dict[str, Any], list[d
         sample: dict[str, Any] = {"cycle": cycle}
         try:
             ready_at = time.perf_counter()
-            ready = candidate.start()
+            candidate.start()
             sample["startup_seconds"] = time.perf_counter() - ready_at
             sample["close_seconds"] = candidate.shutdown(timeout=3)
             sample["process_exited"] = candidate.process is not None and candidate.process.poll() is not None

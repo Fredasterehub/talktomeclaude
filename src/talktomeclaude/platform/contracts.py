@@ -17,6 +17,7 @@ class DeliveryMode(str, Enum):
 
 class DeliveryCode(str, Enum):
     DELIVERED = "delivered"
+    CANCELLED = "cancelled"
     EMPTY_TRANSCRIPT = "empty_transcript"
     INVALID_TARGET = "invalid_target"
     TARGET_CHANGED_PRE_CLIPBOARD = "target_changed_pre_clipboard"

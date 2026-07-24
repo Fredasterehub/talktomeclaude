@@ -8,8 +8,14 @@ recognition, and Chatterbox cloned voices.
 
 - The microphone, speech recognition, TTS, and terminal UI run on the user's local
   machine.
+- On Windows, the Stage A companion is an explicit opt-in. The no-argument dashboard
+  remains the default until the physical release gate approves a later flip.
 - Claude Code may run locally or over passwordless SSH. A remote project directory is
   passed to `claude -p` through a safely quoted login shell.
+- Remote companion mode requires this same TalkToMeClaude checkout on the Claude
+  host for its owned Stop hook and `talktomeclaude hook stream` helper. It does not install
+  or run the local audio/Torch/TTS stack there. Legacy `listen` remote mode does not
+  require this helper.
 - Source installs are editable. A code-only update does not require rebuilding the
   virtual environment, but the running `talktomeclaude` process must be restarted.
 - Reinstall dependencies only when `pyproject.toml`, an optional engine, or a pinned
@@ -39,6 +45,46 @@ python -c "import talktomeclaude; print(talktomeclaude.__file__)"
 6. Run the verification sequence below on Windows and Linux.
 7. Push the feature branch only after both worktrees are clean and green.
 
+## Windows Companion Stage A
+
+The selected production shell is the one-process Tk + Win32 adapter. Launch it only
+through the explicit Stage A entry point:
+
+```powershell
+talktomeclaude companion
+```
+
+Do not change the no-argument default during a routine deployment. Verify all three
+entry points before shipping:
+
+```powershell
+talktomeclaude companion
+talktomeclaude companion --headless
+talktomeclaude tui
+```
+
+For a delivery smoke, focus the intended eligible terminal, select its tab/pane/shell,
+place its blinking cursor, and finish push-toggle. That foreground terminal is held as
+ephemeral evidence only for the active transaction, revalidated before clipboard,
+paste, and optional Enter, then discarded. It is never persisted or reused. Keep the
+same terminal foregrounded until the result is visible.
+
+The operator-facing warning must remain exact across settings/onboarding surfaces:
+
+> Auto-submit sends Enter to the eligible foreground terminal captured at finish-toggle; the operator is responsible for the intended tab, pane, shell, and cursor position.
+
+Verify assistant auto-submit both off (one paste, no Enter) and on (one paste, one
+Enter), plus a changed-target case that sends no later keys. Verify voice listing,
+preview, import cancellation/rollback, and selection without changing existing voice
+references or caches. The complete operator contract is in
+[`WINDOWS_COMPANION.md`](WINDOWS_COMPANION.md).
+
+Rollback uses `talktomeclaude tui` for the established dashboard or
+`talktomeclaude companion --headless` for the production controller without Tk/hotkey.
+Do not downgrade config or remove the companion diagnostics/reply state, registry,
+voice references, or model caches. A default-launch rollback, after a future Stage B
+flip, changes only the entry path.
+
 ## Required Verification
 
 Run from the repository root with the environment's Python:
@@ -51,6 +97,7 @@ talktomeclaude --help
 talktomeclaude voices
 talktomeclaude doctor
 talktomeclaude config get default-voice
+talktomeclaude config get assistant-auto-submit
 ```
 
 When `.kiln/law/check.sh` is available, run it as the canonical project check as well.
@@ -134,9 +181,10 @@ Select the active voice:
 talktomeclaude config set default-voice NAME
 ```
 
-At the time of writing, the dashboard's `V` key toggles spoken replies; it is not a
-voice picker. Preserve this behavior until a deliberate UX change updates the key
-label, interaction, tests, and documentation together.
+The legacy dashboard's `V` key still toggles spoken replies; it is not a voice picker.
+The explicit Windows companion has a separate Voice window for availability, preview,
+selection, and guided clone/Piper import. Preserve the legacy key behavior unless its
+label, interaction, tests, and documentation change together.
 
 ## Expected Warnings and Performance
 
@@ -157,3 +205,6 @@ Record these facts in the PR or commit message for changes touching deployment:
 - cloned voice actually rendered and WAV size was nonzero
 - remote Claude JSON/session round trip result
 - known optional engines or physical microphone paths not tested
+- explicit companion, headless, and legacy TUI launch/clean-exit results
+- foreground-target/auto-submit matrix and whether any `pasted_not_submitted` recovery
+  was exercised

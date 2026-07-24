@@ -415,6 +415,36 @@ class TextInjectorTests(unittest.TestCase):
         self.assertEqual(events.count("keyboard.paste"), 1)
         self.assertNotIn("keyboard.enter", events)
 
+    def test_cancellation_is_checked_before_clipboard_paste_and_enter(self) -> None:
+        cases = (
+            (lambda events: True, DeliveryCode.CANCELLED, False),
+            (
+                lambda events: "clipboard.set" in events,
+                DeliveryCode.CANCELLED,
+                False,
+            ),
+            (
+                lambda events: "keyboard.paste" in events,
+                DeliveryCode.PASTED_NOT_SUBMITTED,
+                True,
+            ),
+        )
+        for cancelled, expected, pasted in cases:
+            with self.subTest(expected=expected, pasted=pasted):
+                injector, _, _, events = self.make_injector([VALID, VALID, VALID])
+                result = injector.deliver(
+                    "hello",
+                    EVIDENCE,
+                    mode=DeliveryMode.ASSISTANT,
+                    auto_submit=True,
+                    cancelled=lambda: cancelled(events),
+                )
+                self.assertEqual(result.code, expected)
+                self.assertEqual(result.pasted, pasted)
+                if not pasted:
+                    self.assertNotIn("keyboard.paste", events)
+                self.assertNotIn("keyboard.enter", events)
+
     def test_enter_failure_stops_and_restores(self) -> None:
         injector, _, _, events = self.make_injector(
             [VALID, VALID, VALID], enter=KeySendCode.FAILED

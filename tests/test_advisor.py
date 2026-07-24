@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import unittest
 from types import SimpleNamespace
 from unittest import mock

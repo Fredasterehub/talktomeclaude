@@ -42,6 +42,7 @@ recording modes. One local command.
 ## What it does
 
 - **Launch dashboard** — run `talktomeclaude` with no arguments for a live signal view, conversation status, recording controls, and a remote project picker.
+- **Opt-in Windows companion** — Stage A adds an explicit `talktomeclaude companion` desktop path beside your ordinary Claude Code terminal; the existing no-argument dashboard remains the default.
 - **Hear you** — local speech-to-text, Whisper-class (faster-whisper). Your voice never leaves the machine.
 - **Answer back** — speaks Claude's actual dialogue in a real voice, and *only* the dialogue. Tool calls, fenced code, and thinking are stripped out.
 - **Ride Claude Code** — a plugin Stop hook speaks each reply automatically. Async, non-blocking, fails silent.
@@ -136,6 +137,18 @@ default **PowerShell** tab.
    .\.venv\Scripts\talktomeclaude assist off
    .\.venv\Scripts\talktomeclaude assist on
    ```
+
+9. **Optional Stage A Windows companion** — launch the selected Tk + Win32
+   companion explicitly:
+   ```powershell
+   .\.venv\Scripts\talktomeclaude companion
+   ```
+   Before finishing a recording, foreground the intended eligible terminal and place
+   its blinking cursor where the transcript belongs. The target is captured only for
+   that delivery and is never remembered across turns. Read the complete safety,
+   auto-submit, voice, diagnostics, and recovery contract in
+   repository guide,
+   **[Windows Companion (Stage A)](https://github.com/Fredasterehub/talktomeclaude/blob/main/docs/WINDOWS_COMPANION.md)**.
 
 ---
 
@@ -252,7 +265,11 @@ the server; only text goes over SSH. Here's the whole thing, top to bottom.
    claude --version    # confirm it's installed and on PATH
    claude              # run it once interactively to log in, then exit
    ```
-   The server needs **only Claude Code** — no talktomeclaude, no audio, nothing else.
+   For the legacy `listen` command, the server needs **only Claude Code** — no
+   talktomeclaude or audio runtime. The Windows Stage A companion uses its durable
+   Stop-hook/reply stream instead, so install the same TalkToMeClaude checkout on
+   the server and keep its `talktomeclaude` console script on `PATH`; it still needs
+   no microphone, speaker, Torch, or TTS model there.
 
 **On YOUR COMPUTER** (Windows or Mac — the mic and speakers live here):
 
@@ -324,6 +341,8 @@ To forget the saved project directory too, run
 | Command | What it does |
 |---|---|
 | `talktomeclaude` / `ui` | Open the interactive dashboard with live microphone signal, session state, voice controls, and a remote project picker. |
+| `companion [--headless]` | Windows Stage A: explicitly launch the Tk + Win32 companion, or its non-graphical production recovery controller. The no-argument default is unchanged. |
+| `tui` | Explicitly open the legacy Textual dashboard/recovery path. |
 | `setup [--reset] [--force]` | Re-run the first-run setup screen to choose `recording-mode` and `claude-permissions`. |
 | `speak "text"` | Synthesize and play a line locally. `--out file.wav` writes instead of plays; `--voice NAME` picks a voice. |
 | `listen` | Drive Claude Code by voice. `--mode always-on\|push-to-talk\|push-toggle`, `--once` for a single utterance, `--remote user@host` to run Claude on a server over SSH, `--remote-cwd PATH` to select its project directory, `--tmux-pane` to type into a live TUI. |
@@ -331,7 +350,7 @@ To forget the saved project directory too, run
 | `filter TRANSCRIPT.jsonl` | Print only Claude's spoken dialogue from a transcript (`-` for stdin) — the core "dialogue, never code" filter. |
 | `voices` | List the voices, their licenses, and which is the default for your hardware. `--download` pre-fetches them all. |
 | `voice create NAME (--reference PATH \| --record SECONDS) [--sample/--no-sample] [--sample-text TEXT] [--play] [--set-default]` | Register a cloned voice from an existing reference file or a fresh recording using the optional cloning engine. |
-| `config set KEY VALUE` / `config get KEY` | Persist or read settings. Keys: `recording-mode`, `voice-assist`, `claude-permissions`, `remote` (`user@host`, or `local` to clear), `remote-cwd` (server path, or `home` to clear), `barge-in`, `wake-word`, `wake-phrase`, `wake-model`, `default-voice`. |
+| `config set KEY VALUE` / `config get KEY` | Persist or read settings. Keys: `recording-mode`, `voice-assist`, `assistant-auto-submit`, `claude-permissions`, `remote` (`user@host`, or `local` to clear), `remote-cwd` (server path, or `home` to clear), `barge-in`, `wake-word`, `wake-phrase`, `wake-model`, `default-voice`. |
 | `assist on\|off\|status` | The full mute switch. `off` silences the Stop hook and all spoken replies. |
 
 **First-run onboarding** — the first bare `talktomeclaude` invocation opens the

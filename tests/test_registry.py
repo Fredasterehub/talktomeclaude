@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -38,6 +40,35 @@ class RegistryTests(unittest.TestCase):
     def test_empty_registry_lists_nothing(self) -> None:
         self.assertEqual(registry.list_voices(), [])
         self.assertIsNone(registry.get("nope"))
+
+    def test_two_processes_preserve_independent_voice_updates(self) -> None:
+        first = self._make_piper("voice_a")
+        second = self._make_piper("voice_b")
+        code = (
+            "import sys; "
+            "from talktomeclaude import registry; "
+            "registry.add_piper(sys.argv[1], sys.argv[2])"
+        )
+        processes = [
+            subprocess.Popen(
+                [sys.executable, "-c", code, name, str(model)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+            for name, model in (("voice_a", first), ("voice_b", second))
+        ]
+        failures = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=15)
+            if process.returncode:
+                failures.append((process.returncode, stdout, stderr))
+        self.assertEqual(failures, [])
+        self.assertEqual(
+            [voice.name for voice in registry.list_voices()],
+            ["voice_a", "voice_b"],
+        )
 
     def test_add_piper_references_model_in_place(self) -> None:
         model = self._make_piper()

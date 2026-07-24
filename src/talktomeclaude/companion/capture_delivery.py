@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import threading
 from typing import Any, Protocol
 
 from talktomeclaude.capture import (
@@ -56,6 +57,7 @@ class TextDelivery(Protocol):
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: CancellationProbe = lambda: False,
     ) -> DeliveryResult: ...
 
 
@@ -138,6 +140,7 @@ class CaptureDeliveryCoordinator:
         self._capture = capture
         self._injector = injector
         self._runtime = runtime or RuntimeCoordinator()
+        self._delivery_lock = threading.RLock()
 
     @property
     def runtime(self) -> RuntimeCoordinator:
@@ -162,6 +165,18 @@ class CaptureDeliveryCoordinator:
     def add_audio(self, chunk: Any) -> None:
         self._capture.add_audio(chunk)
 
+    def cancel(self) -> None:
+        """Cancel owned capture state and discard its opaque audio chunks."""
+
+        # Serialize with the complete synchronous injection transaction.  If a
+        # Win32 SendInput call was already admitted, cancellation returns only
+        # after that call and all later cancellation checks have settled; no
+        # clipboard/key side effect can occur after this method returns.
+        with self._delivery_lock:
+            if self._capture.phase is CapturePhase.RECORDING:
+                self._capture.cancel()
+            self._runtime.dispatch(RuntimeEvent(EventKind.CANCEL))
+
     def finish_toggle(
         self,
         factory: TranscriberFactory,
@@ -172,16 +187,29 @@ class CaptureDeliveryCoordinator:
     ) -> CaptureDeliveryResult:
         """Snapshot at toggle completion, then transcribe and maybe deliver."""
 
-        completion = self._capture.toggle()
-        if not isinstance(completion, CaptureCompletion):
-            raise RuntimeError("finish-toggle started a new capture unexpectedly")
+        completion = self.begin_finish_toggle()
         return self.process_completion(
             completion,
             factory,
             mode=mode,
             auto_submit=auto_submit,
             cancelled=cancelled,
+            runtime_transitioned=True,
         )
+
+    def begin_finish_toggle(self) -> CaptureCompletion:
+        """Close toggle capture and expose TRANSCRIBING before slow STT work.
+
+        Graphical callers use this split boundary so the finish intent can
+        update its semantic state synchronously, then run
+        :meth:`process_completion` on a worker without blocking Tk.
+        """
+
+        completion = self._capture.toggle()
+        if not isinstance(completion, CaptureCompletion):
+            raise RuntimeError("finish-toggle started a new capture unexpectedly")
+        self._begin_completion_transition()
+        return completion
 
     def release_hold(
         self,
@@ -193,14 +221,22 @@ class CaptureDeliveryCoordinator:
     ) -> CaptureDeliveryResult:
         """Finish hold-to-talk at key release and process its snapshot."""
 
-        completion = self._capture.release()
+        completion = self.begin_release_hold()
         return self.process_completion(
             completion,
             factory,
             mode=mode,
             auto_submit=auto_submit,
             cancelled=cancelled,
+            runtime_transitioned=True,
         )
+
+    def begin_release_hold(self) -> CaptureCompletion:
+        """Close hold-to-talk capture at key release before slow STT work."""
+
+        completion = self._capture.release()
+        self._begin_completion_transition()
+        return completion
 
     def process_completion(
         self,
@@ -210,6 +246,7 @@ class CaptureDeliveryCoordinator:
         mode: DeliveryMode,
         auto_submit: bool,
         cancelled: CancellationProbe = lambda: False,
+        runtime_transitioned: bool = False,
     ) -> CaptureDeliveryResult:
         """Process an already-finished take without retaining its evidence."""
 
@@ -236,13 +273,11 @@ class CaptureDeliveryCoordinator:
         ):
             completion = self._capture.consume_preserved(completion)
 
-        transition = self._runtime.dispatch(
-            RuntimeEvent(EventKind.FINISH_RECORDING)
-        )
-        if not transition.accepted:
-            raise RuntimeError(
-                f"capture cannot finish while {transition.current.phase.value}"
-            )
+        if runtime_transitioned:
+            if self._runtime.state.phase is not RuntimePhase.TRANSCRIBING:
+                raise RuntimeError("capture completion does not own transcribing state")
+        else:
+            self._begin_completion_transition()
 
         try:
             turn = self._capture.transcribe(
@@ -307,7 +342,12 @@ class CaptureDeliveryCoordinator:
             return self._review(turn)
 
         if disposition is TranscriptDisposition.ACCEPTED:
-            return self._deliver_turn(turn, mode=mode, auto_submit=auto_submit)
+            return self._deliver_turn(
+                turn,
+                mode=mode,
+                auto_submit=auto_submit,
+                cancelled=cancelled,
+            )
         if disposition in {
             TranscriptDisposition.EMPTY,
             TranscriptDisposition.LOW_CONFIDENCE,
@@ -330,12 +370,20 @@ class CaptureDeliveryCoordinator:
             transcript_disposition=disposition,
         )
 
+    def _begin_completion_transition(self) -> None:
+        transition = self._runtime.dispatch(RuntimeEvent(EventKind.FINISH_RECORDING))
+        if not transition.accepted:
+            raise RuntimeError(
+                f"capture cannot finish while {transition.current.phase.value}"
+            )
+
     def confirm_or_recover(
         self,
         transcript: TranscriptReview,
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: CancellationProbe = lambda: False,
     ) -> CaptureDeliveryResult:
         """Deliver reviewed text using new confirm-time target evidence.
 
@@ -364,6 +412,14 @@ class CaptureDeliveryCoordinator:
                 f"transcript cannot be confirmed while {confirmed.current.phase.value}"
             )
 
+        if cancelled():
+            return CaptureDeliveryResult(
+                CaptureDeliveryCode.CANCELLED,
+                None,
+                None,
+                self._runtime.state.phase,
+                fresh_snapshot_required=True,
+            )
         resolution = self._injector.snapshot_target()
         evidence = _resolution_evidence(resolution)
         return self._deliver(
@@ -371,6 +427,7 @@ class CaptureDeliveryCoordinator:
             evidence,
             mode=mode,
             auto_submit=auto_submit,
+            cancelled=cancelled,
         )
 
     def _review(self, turn: CaptureTurnResult) -> CaptureDeliveryResult:
@@ -395,6 +452,7 @@ class CaptureDeliveryCoordinator:
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: CancellationProbe,
     ) -> CaptureDeliveryResult:
         transition = self._runtime.dispatch(
             RuntimeEvent(EventKind.TRANSCRIPT_ACCEPTED)
@@ -409,6 +467,7 @@ class CaptureDeliveryCoordinator:
             evidence,
             mode=mode,
             auto_submit=auto_submit,
+            cancelled=cancelled,
         )
 
     def _deliver(
@@ -418,10 +477,31 @@ class CaptureDeliveryCoordinator:
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: CancellationProbe = lambda: False,
+    ) -> CaptureDeliveryResult:
+        with self._delivery_lock:
+            return self._deliver_serialized(
+                transcript,
+                evidence,
+                mode=mode,
+                auto_submit=auto_submit,
+                cancelled=cancelled,
+            )
+
+    def _deliver_serialized(
+        self,
+        transcript: TranscriptAcceptance | TranscriptReview,
+        evidence: Any,
+        *,
+        mode: DeliveryMode,
+        auto_submit: bool,
+        cancelled: CancellationProbe,
     ) -> CaptureDeliveryResult:
         # Invalid initial resolution is a coordinator-level fail-closed path:
         # do not even enter the platform mutation transaction.
-        if evidence is None:
+        if cancelled():
+            delivery = DeliveryResult(DeliveryCode.CANCELLED)
+        elif evidence is None:
             delivery = DeliveryResult(DeliveryCode.INVALID_TARGET)
         else:
             delivery = self._injector.deliver(
@@ -429,6 +509,7 @@ class CaptureDeliveryCoordinator:
                 evidence,
                 mode=mode,
                 auto_submit=auto_submit,
+                cancelled=cancelled,
             )
 
         if delivery.succeeded:
@@ -447,6 +528,17 @@ class CaptureDeliveryCoordinator:
                 None,
                 delivery,
                 self._runtime.state.phase,
+            )
+
+        if delivery.code is DeliveryCode.CANCELLED:
+            if self._runtime.state.phase is not RuntimePhase.STOPPING:
+                self._runtime.dispatch(RuntimeEvent(EventKind.CANCEL))
+            return CaptureDeliveryResult(
+                CaptureDeliveryCode.CANCELLED,
+                None,
+                delivery,
+                self._runtime.state.phase,
+                fresh_snapshot_required=True,
             )
 
         self._runtime.dispatch(

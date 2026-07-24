@@ -16,6 +16,9 @@ from .contracts import (
 
 _TRANSITIONS: dict[tuple[RuntimePhase, EventKind], RuntimePhase] = {
     (RuntimePhase.IDLE, EventKind.START_RECORDING): RuntimePhase.RECORDING,
+    # A durable Stop-hook reply can arrive for a turn typed directly in the
+    # operator's terminal, or be recovered from the inbox after restart.
+    (RuntimePhase.IDLE, EventKind.REPLY_RECEIVED): RuntimePhase.PLANNING,
     (RuntimePhase.RECORDING, EventKind.FINISH_RECORDING): RuntimePhase.TRANSCRIBING,
     (
         RuntimePhase.TRANSCRIBING,

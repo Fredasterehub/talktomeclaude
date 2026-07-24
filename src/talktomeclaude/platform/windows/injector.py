@@ -227,11 +227,14 @@ class TextInjector:
         *,
         mode: DeliveryMode,
         auto_submit: bool,
+        cancelled: Callable[[], bool] = lambda: False,
     ) -> DeliveryResult:
         if not text or not text.strip():
             return DeliveryResult(DeliveryCode.EMPTY_TRANSCRIPT)
         if evidence is None:
             return DeliveryResult(DeliveryCode.INVALID_TARGET)
+        if cancelled():
+            return DeliveryResult(DeliveryCode.CANCELLED)
 
         pre_clipboard = self._resolver.validate(evidence)
         if not pre_clipboard.valid:
@@ -239,6 +242,8 @@ class TextInjector:
                 DeliveryCode.TARGET_CHANGED_PRE_CLIPBOARD,
                 target_reason=pre_clipboard.code.value,
             )
+        if cancelled():
+            return DeliveryResult(DeliveryCode.CANCELLED)
 
         clipboard = self._clipboard_factory()
         snapshot = clipboard.snapshot()
@@ -250,6 +255,11 @@ class TextInjector:
             else:
                 code = DeliveryCode.CLIPBOARD_READ_FAILED
             return DeliveryResult(code)
+        if cancelled():
+            return DeliveryResult(
+                DeliveryCode.CANCELLED,
+                restore_status=clipboard.restore(),
+            )
 
         replacement = clipboard.set_text(text)
         if not replacement.succeeded:
@@ -260,6 +270,11 @@ class TextInjector:
                 else DeliveryCode.CLIPBOARD_SET_FAILED
             )
             return DeliveryResult(code, restore_status=restore)
+        if cancelled():
+            return DeliveryResult(
+                DeliveryCode.CANCELLED,
+                restore_status=clipboard.restore(),
+            )
 
         pre_paste = self._resolver.validate(evidence)
         if not pre_paste.valid:
@@ -267,6 +282,11 @@ class TextInjector:
                 DeliveryCode.TARGET_CHANGED_PRE_PASTE,
                 restore_status=clipboard.restore(),
                 target_reason=pre_paste.code.value,
+            )
+        if cancelled():
+            return DeliveryResult(
+                DeliveryCode.CANCELLED,
+                restore_status=clipboard.restore(),
             )
 
         paste = _coerce_key_send(self._keyboard.send_paste(), expected=4)
@@ -289,6 +309,13 @@ class TextInjector:
                 pasted=True,
                 restore_status=clipboard.restore(),
             )
+        if cancelled():
+            return DeliveryResult(
+                DeliveryCode.PASTED_NOT_SUBMITTED,
+                pasted=True,
+                restore_status=clipboard.restore(),
+                target_reason="cancelled",
+            )
 
         pre_enter = self._resolver.validate(evidence)
         if not pre_enter.valid:
@@ -297,6 +324,13 @@ class TextInjector:
                 pasted=True,
                 restore_status=clipboard.restore(),
                 target_reason=pre_enter.code.value,
+            )
+        if cancelled():
+            return DeliveryResult(
+                DeliveryCode.PASTED_NOT_SUBMITTED,
+                pasted=True,
+                restore_status=clipboard.restore(),
+                target_reason="cancelled",
             )
 
         enter = _coerce_key_send(self._keyboard.send_enter(), expected=2)
