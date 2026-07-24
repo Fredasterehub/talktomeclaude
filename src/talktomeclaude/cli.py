@@ -711,7 +711,9 @@ def hook() -> None:
     is_flag=True,
     help="Print what would be spoken as a SPEAK: line instead of playing audio.",
 )
-def stop(dry_run: bool) -> None:
+@click.option("--transport", is_flag=True, hidden=True)
+@click.option("--owner-marker", hidden=True)
+def stop(dry_run: bool, transport: bool, owner_marker: str | None) -> None:
     """Handle a Stop event: speak Claude's final reply.
 
     Reads the hook event JSON from stdin and speaks the dialogue of
@@ -719,12 +721,47 @@ def stop(dry_run: bool) -> None:
     voice-assist mute switch and never blocks Claude Code — every
     outcome exits 0.
     """
+    import os
     import sys
 
     from talktomeclaude import config
-    from talktomeclaude.hook import read_stop_event, stop_dialogue
+    from talktomeclaude.hook import (
+        read_stop_event,
+        record_transport_fault,
+        stop_dialogue,
+        transport_stop_event,
+    )
 
     event = read_stop_event(sys.stdin)
+    if transport:
+        from talktomeclaude.assistant import OWNED_HOOK_MARKER
+
+        if event is not None and owner_marker == OWNED_HOOK_MARKER:
+            try:
+                transport_result = transport_stop_event(event, environment=os.environ)
+                if transport_result is None:
+                    record_transport_fault(
+                        "invalid_stop_event", environment=os.environ
+                    )
+                elif transport_result.code.value not in {
+                    "accepted",
+                    "suppressed_role",
+                    "suppressed_session",
+                    "suppressed_correlation",
+                }:
+                    record_transport_fault(
+                        transport_result.code.value, environment=os.environ
+                    )
+            except Exception as exc:
+                # A hook must never block Claude Code.  Durable failures remain
+                # visible through spool/transport diagnostics and replay state.
+                try:
+                    record_transport_fault(
+                        f"exception_{type(exc).__name__}", environment=os.environ
+                    )
+                except Exception:
+                    pass
+        return
     if event is None or not config.voice_assist_enabled():
         return
     dialogue = stop_dialogue(event)

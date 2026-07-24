@@ -35,6 +35,11 @@ class HookCharacterizationTests(unittest.TestCase):
             with self.subTest(payload=payload):
                 self.assertIsNone(read_stop_event(io.StringIO(payload)))
 
+    def test_stop_event_parser_bounds_original_stdin_before_json_decode(self) -> None:
+        payload = '{"last_assistant_message":"' + ("x" * 64) + '"}'
+
+        self.assertIsNone(read_stop_event(io.StringIO(payload), max_bytes=32))
+
     def test_dialogue_uses_last_assistant_message_not_transcript_path(self) -> None:
         event = {
             "last_assistant_message": "Café ☕ is ready. Run `unsafe()` only onscreen.",
