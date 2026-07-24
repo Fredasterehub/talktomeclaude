@@ -17,6 +17,13 @@ MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 
 
+def _get_last_error() -> int:
+    """Return the Win32 thread-local error, or zero under non-Windows tests."""
+
+    getter = getattr(ctypes, "get_last_error", None)
+    return int(getter()) if getter is not None else 0
+
+
 class HotkeyFacade(Protocol):
     def register_hotkey(self, hwnd: int, hotkey_id: int, modifiers: int, vk: int) -> bool: ...
     def unregister_hotkey(self, hwnd: int, hotkey_id: int) -> bool: ...
@@ -82,7 +89,7 @@ class GlobalHotkeyAdapter:
         if not self._facade.register_hotkey(
             self._hwnd, hotkey_id, effective_modifiers, vk
         ):
-            raise OSError(ctypes.get_last_error(), "RegisterHotKey failed")
+            raise OSError(_get_last_error(), "RegisterHotKey failed")
         self._registered.add(hotkey_id)
 
     def unregister(self, hotkey_id: int) -> None:
@@ -90,7 +97,7 @@ class GlobalHotkeyAdapter:
         if hotkey_id not in self._registered:
             return
         if not self._facade.unregister_hotkey(self._hwnd, hotkey_id):
-            raise OSError(ctypes.get_last_error(), "UnregisterHotKey failed")
+            raise OSError(_get_last_error(), "UnregisterHotKey failed")
         self._registered.remove(hotkey_id)
 
     def close(self) -> None:

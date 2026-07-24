@@ -635,6 +635,17 @@ class HotkeyTests(unittest.TestCase):
         adapter.close()
         self.assertEqual(facade.unregister_calls, [])
 
+    def test_unregister_failure_is_portable_and_retryable(self) -> None:
+        facade = _HotkeyFacade()
+        adapter = GlobalHotkeyAdapter(facade)
+        adapter.register(1, 0, 0x78)
+        facade.unregister_ok = False
+        with self.assertRaises(OSError):
+            adapter.unregister(1)
+        facade.unregister_ok = True
+        adapter.unregister(1)
+        self.assertEqual(facade.unregister_calls, [(0, 1), (0, 1)])
+
     def test_shell_owned_dispatch_only_queues_registered_hotkey_intent(self) -> None:
         facade = _HotkeyFacade()
         intent_queue = _IntentQueue()
