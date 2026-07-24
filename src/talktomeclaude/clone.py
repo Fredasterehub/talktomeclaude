@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from talktomeclaude.tts import TTSError
+from talktomeclaude.speech.voices import TTSError
 
 _SAMPLE_RATE_FALLBACK = 24000
 _YTDLP_MAX_FILESIZE = "250M"

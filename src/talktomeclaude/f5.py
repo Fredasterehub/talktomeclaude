@@ -7,7 +7,7 @@ no F5-TTS package or GPU stack present.
 
 from pathlib import Path
 
-from talktomeclaude.tts import TTSError
+from talktomeclaude.speech.voices import TTSError
 
 _model = None
 
