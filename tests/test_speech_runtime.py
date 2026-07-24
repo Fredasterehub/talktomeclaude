@@ -80,6 +80,19 @@ class _KillRequiredWorker(_Worker):
         return 0
 
 
+class _BlockingWaitWorker(_Worker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.wait_entered = threading.Event()
+        self.wait_release = threading.Event()
+
+    def wait(self, timeout: float) -> int:
+        self.wait_entered.set()
+        if not self.wait_release.wait(timeout):
+            raise TimeoutError
+        return 0
+
+
 class PersistentSpeechRuntimeTests(unittest.TestCase):
     def test_persistent_boundary_submits_without_exposing_text_or_switching_voice(
         self,
@@ -162,6 +175,38 @@ class PersistentSpeechRuntimeTests(unittest.TestCase):
 
         self.assertLess(time.monotonic() - started, 0.2)
         self.assertEqual(worker.killed, 1)
+
+    def test_shutdown_prevents_late_boundary_reset_from_creating_worker(self) -> None:
+        workers: list[_Worker] = []
+        worker = _BlockingWaitWorker()
+
+        def factory(_voice: str) -> _Worker:
+            created = worker if not workers else _Worker()
+            workers.append(created)
+            return created
+
+        runtime = PersistentSpeechRuntime(
+            "rick", factory, shutdown_deadline_seconds=0.2
+        )
+        shutdown_result: list[bool] = []
+        shutdown = threading.Thread(
+            target=lambda: shutdown_result.append(runtime.shutdown())
+        )
+        shutdown.start()
+        self.assertTrue(worker.wait_entered.wait(1))
+
+        reset_result: list[bool] = []
+        reset = threading.Thread(
+            target=lambda: reset_result.append(runtime.reset_synthesis_boundary())
+        )
+        reset.start()
+        worker.wait_release.set()
+        shutdown.join(1)
+        reset.join(1)
+
+        self.assertEqual(shutdown_result, [True])
+        self.assertEqual(reset_result, [False])
+        self.assertEqual(workers, [worker])
 
     def test_noncooperative_worker_is_bounded_unavailable_and_never_replaced(self) -> None:
         workers: list[_Worker] = []

@@ -312,6 +312,7 @@ class PersistentSpeechRuntime:
         self._factory = worker_factory
         self._shutdown_deadline_seconds = deadline
         self._lock = threading.RLock()
+        self._closed = False
         self._worker: SynthesisWorker | None = _bounded_create(
             worker_factory, selected_voice, deadline
         )
@@ -341,6 +342,8 @@ class PersistentSpeechRuntime:
         """Boundedly replace the worker and return the identical parent state."""
 
         with self._lock:
+            if self._closed:
+                raise SpeechRuntimeError("speech runtime is shut down")
             deadline = time.monotonic() + self._shutdown_deadline_seconds
 
             def remaining() -> float:
@@ -391,6 +394,7 @@ class PersistentSpeechRuntime:
         """Boundedly reap the current worker without creating a replacement."""
 
         with self._lock:
+            self._closed = True
             worker = self._worker
             self._available = False
             if worker is None:
