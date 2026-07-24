@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import subprocess
 import sys
 import threading
 import time
@@ -16,9 +17,9 @@ from pathlib import Path
 from talktomeclaude.speech import (
     PersistentSpeechRuntime,
     SoundDevicePlayback,
-    SpawnSynthesisWorker,
     SpeechArtifact,
     SynthesisRequest,
+    production_synthesis_worker,
 )
 
 
@@ -32,7 +33,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest().upper()
 
 
-def _quiet_copy(source: Path) -> Path:
+def _quiet_copy(source: Path) -> tuple[Path, int]:
     target = source.with_name(f"{source.stem}-quiet.wav")
     with wave.open(str(source), "rb") as reader:
         parameters = reader.getparams()
@@ -50,7 +51,30 @@ def _quiet_copy(source: Path) -> Path:
     with wave.open(str(target), "wb") as writer:
         writer.setparams(parameters)
         writer.writeframes(samples.tobytes())
-    return target
+    return target, parameters.framerate
+
+
+def _output_device_name() -> str:
+    import sounddevice
+
+    selected = sounddevice.default.device
+    output_index = selected[1] if isinstance(selected, (list, tuple)) else selected
+    details = sounddevice.query_devices(output_index, "output")
+    return str(details["name"])
+
+
+def _git_sha() -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=10,
+        check=True,
+    )
+    return result.stdout.strip()
 
 
 def _trial(device: SoundDevicePlayback, artifact: SpeechArtifact) -> float:
@@ -69,13 +93,14 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
     config_before = _sha256(config_path)
     runtime = PersistentSpeechRuntime(
         args.voice,
-        lambda voice: SpawnSynthesisWorker(voice),
+        production_synthesis_worker,
         shutdown_deadline_seconds=10.0,
     )
     result_ready = threading.Event()
     results = []
     artifact: SpeechArtifact | None = None
     quiet_path: Path | None = None
+    sample_rate_hz: int | None = None
     shutdown_clean = False
     try:
         runtime.submit(
@@ -93,7 +118,7 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         artifact = results[0].artifact
         if not isinstance(artifact.payload, Path):
             raise SmokeFailure("artifact_not_path")
-        quiet_path = _quiet_copy(artifact.payload)
+        quiet_path, sample_rate_hz = _quiet_copy(artifact.payload)
         quiet_artifact = SpeechArtifact(
             generation=0,
             unit_id="g6-quiet-interruption",
@@ -114,8 +139,18 @@ def _run(args: argparse.Namespace) -> dict[str, object]:
         return {
             "config_sha256": config_after,
             "device_silence_confirmed": True,
+            "failures": 0,
+            "git_sha": _git_sha(),
+            "max_interrupt_ms": round(ordered[-1], 3),
+            "median_interrupt_ms": round(
+                (ordered[(len(ordered) - 1) // 2] + ordered[len(ordered) // 2]) / 2,
+                3,
+            ),
+            "min_interrupt_ms": round(ordered[0], 3),
+            "output_device": _output_device_name(),
             "p95_interrupt_ms": round(p95, 3),
             "result_code": "passed",
+            "sample_rate_hz": sample_rate_hz,
             "selected_voice": args.voice,
             "shutdown_clean": shutdown_clean,
             "synthesis_artifact_bytes": artifact.payload.stat().st_size,

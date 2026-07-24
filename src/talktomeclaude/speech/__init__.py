@@ -70,6 +70,7 @@ from .runtime import (
 )
 from .session import (
     Control,
+    ControlCommand,
     FreezeResult,
     FrozenAnswerState,
     NavigationResult,
@@ -79,6 +80,7 @@ from .session import (
     PreviewClaim,
     PreviewEffectState,
     parse_control,
+    parse_control_command,
 )
 from .voices import TTSError
 
@@ -91,6 +93,7 @@ __all__ = [
     "CanonicalError",
     "CanonicalSpeechController",
     "Control",
+    "ControlCommand",
     "DirectorCache",
     "DirectorCode",
     "DirectorOutcome",
@@ -142,6 +145,7 @@ __all__ = [
     "director_command",
     "inspect_preservation",
     "parse_control",
+    "parse_control_command",
     "production_synthesis_worker",
     "protected_values",
     "refine_unsaid",

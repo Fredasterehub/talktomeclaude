@@ -58,6 +58,7 @@ from talktomeclaude.reply.ssh import (
     TransportStatus,
     TransportStatusCode,
 )
+from talktomeclaude.speech import parse_control_command
 from talktomeclaude.speech.voices import default_voice, get_voice, is_available
 
 
@@ -466,7 +467,11 @@ def build_headless_controller() -> CompanionController:
         snapshot_resolver=SnapshotCallableAdapter(injector.snapshot_target),
         audio_assembler=Float32AudioAssembler(),
     )
-    capture = CaptureDeliveryCoordinator(capture_service, injector)
+    capture = CaptureDeliveryCoordinator(
+        capture_service,
+        injector,
+        control_parser=parse_control_command,
+    )
 
     def record_audio_fault(fault: Any) -> None:
         diagnostics.record("audio_fault", error_code=fault.code.value)
@@ -530,7 +535,11 @@ def build_desktop_application() -> DesktopCompanionApplication:
         snapshot_resolver=SnapshotCallableAdapter(injector.snapshot_target),
         audio_assembler=Float32AudioAssembler(),
     )
-    capture = CaptureDeliveryCoordinator(capture_service, injector)
+    capture = CaptureDeliveryCoordinator(
+        capture_service,
+        injector,
+        control_parser=parse_control_command,
+    )
     def record_audio_fault(fault: Any) -> None:
         diagnostics.record("audio_fault", error_code=fault.code.value)
 

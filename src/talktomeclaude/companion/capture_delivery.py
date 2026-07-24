@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from talktomeclaude.capture import (
@@ -38,6 +39,7 @@ from talktomeclaude.platform.contracts import (
 
 class CaptureDeliveryCode(str, Enum):
     DELIVERED = "delivered"
+    CONTROL = "control"
     REVIEW_REQUIRED = "review_required"
     CANCELLED = "cancelled"
     STALE = "stale"
@@ -94,6 +96,7 @@ class CaptureDeliveryResult:
     boundary_replacement_required: bool = False
     error_code: str | None = None
     transcript_disposition: TranscriptDisposition | None = None
+    control: object | None = field(default=None, repr=False)
 
     @property
     def succeeded(self) -> bool:
@@ -103,6 +106,11 @@ class CaptureDeliveryResult:
     def diagnostics(self) -> dict[str, object]:
         """Return explicitly content-free fields safe for logs/telemetry."""
 
+        control_value = (
+            self.control
+            if isinstance(self.control, Enum)
+            else getattr(self.control, "control", None)
+        )
         return {
             "code": self.code.value,
             "transcript_disposition": (
@@ -121,6 +129,12 @@ class CaptureDeliveryResult:
             "fresh_snapshot_required": self.fresh_snapshot_required,
             "boundary_replacement_required": self.boundary_replacement_required,
             "error_code": self.error_code,
+            "control_code": (
+                control_value.value
+                if isinstance(control_value, Enum)
+                and isinstance(control_value.value, str)
+                else None
+            ),
         }
 
 
@@ -136,10 +150,13 @@ class CaptureDeliveryCoordinator:
         capture: CaptureService,
         injector: TextDelivery,
         runtime: RuntimeCoordinator | None = None,
+        *,
+        control_parser: Callable[[str], object | None] | None = None,
     ) -> None:
         self._capture = capture
         self._injector = injector
         self._runtime = runtime or RuntimeCoordinator()
+        self._control_parser = control_parser
         self._delivery_lock = threading.RLock()
 
     @property
@@ -340,6 +357,29 @@ class CaptureDeliveryCoordinator:
             }
         ):
             return self._review(turn)
+
+        if (
+            disposition is TranscriptDisposition.ACCEPTED
+            and mode is DeliveryMode.ASSISTANT
+            and self._control_parser is not None
+        ):
+            control = self._control_parser(turn.transcript.text)
+            if control is not None:
+                transition = self._runtime.dispatch(RuntimeEvent(EventKind.CANCEL))
+                if not transition.accepted:
+                    raise RuntimeError("runtime rejected accepted voice control")
+                return CaptureDeliveryResult(
+                    CaptureDeliveryCode.CONTROL,
+                    None,
+                    None,
+                    self._runtime.state.phase,
+                    fresh_snapshot_required=True,
+                    boundary_replacement_required=(
+                        turn.boundary_replacement_required
+                    ),
+                    transcript_disposition=disposition,
+                    control=control,
+                )
 
         if disposition is TranscriptDisposition.ACCEPTED:
             return self._deliver_turn(

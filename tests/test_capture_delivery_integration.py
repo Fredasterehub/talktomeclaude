@@ -41,6 +41,7 @@ from talktomeclaude.platform.windows.target import (
     TargetResolution,
     TargetValidation,
 )
+from talktomeclaude.speech import Control, parse_control_command
 
 
 EVIDENCE = TargetEvidence(
@@ -152,6 +153,7 @@ def _vertical(
     validations: list[TargetValidation] | None = None,
     settings: CaptureSettings | None = None,
     clock: _Clock | None = None,
+    control_parser=None,
 ):
     events: list[str] = []
     resolver = _Resolver(
@@ -170,7 +172,11 @@ def _vertical(
         clock=clock or _Clock(),
         snapshot_resolver=SnapshotCallableAdapter(injector.snapshot_target),
     )
-    coordinator = CaptureDeliveryCoordinator(capture, injector)
+    coordinator = CaptureDeliveryCoordinator(
+        capture,
+        injector,
+        control_parser=control_parser,
+    )
     return coordinator, resolver, clipboard, events, _factory(transcript, events)
 
 
@@ -238,6 +244,76 @@ class CaptureDeliveryIntegrationTests(unittest.TestCase):
                     if mode is DeliveryMode.GENERIC
                     else RuntimePhase.WAITING_FOR_CLAUDE,
                 )
+
+    def test_accepted_assistant_control_never_reaches_delivery_boundary(self) -> None:
+        coordinator, resolver, clipboard, events, factory = _vertical(
+            transcript=Transcription("  Go   Back ", 0.99),
+            control_parser=parse_control_command,
+        )
+        coordinator.start()
+        coordinator.add_audio(b"audio")
+
+        result = coordinator.finish_toggle(
+            factory,
+            mode=DeliveryMode.ASSISTANT,
+            auto_submit=True,
+        )
+
+        self.assertEqual(result.code, CaptureDeliveryCode.CONTROL)
+        self.assertIs(result.control.control, Control.GO_BACK)
+        self.assertEqual(result.runtime_phase, RuntimePhase.IDLE)
+        self.assertTrue(result.fresh_snapshot_required)
+        self.assertIsNone(result.transcript)
+        self.assertIsNone(result.delivery)
+        self.assertIsNone(clipboard.text)
+        self.assertEqual(
+            events,
+            ["target.snapshot", "stt.construct", "stt.transcribe"],
+        )
+        self.assertEqual(resolver.snapshot_calls, 1)
+        self.assertEqual(result.diagnostics["control_code"], "go_back")
+        self.assertNotIn("Go", repr(result))
+        self.assertNotIn("Go", repr(result.diagnostics))
+
+    def test_control_parser_does_not_override_generic_or_review_delivery(self) -> None:
+        generic, _, _, generic_events, generic_factory = _vertical(
+            transcript=Transcription("pause", 0.99),
+            control_parser=parse_control_command,
+        )
+        generic.start()
+        generic.add_audio(b"audio")
+        generic_result = generic.finish_toggle(
+            generic_factory,
+            mode=DeliveryMode.GENERIC,
+            auto_submit=False,
+        )
+        self.assertEqual(generic_result.code, CaptureDeliveryCode.DELIVERED)
+        self.assertIn("keyboard.paste", generic_events)
+
+        reviewed, _, _, reviewed_events, reviewed_factory = _vertical(
+            transcript=Transcription("pause", 0.1),
+            control_parser=parse_control_command,
+            resolutions=[
+                TargetResolution(EVIDENCE, TargetCode.VALID),
+                TargetResolution(OTHER_EVIDENCE, TargetCode.VALID),
+            ],
+        )
+        reviewed.start()
+        reviewed.add_audio(b"audio")
+        review_result = reviewed.finish_toggle(
+            reviewed_factory,
+            mode=DeliveryMode.ASSISTANT,
+            auto_submit=True,
+        )
+        self.assertEqual(review_result.code, CaptureDeliveryCode.REVIEW_REQUIRED)
+        assert review_result.transcript is not None
+        confirmed = reviewed.confirm_or_recover(
+            review_result.transcript,
+            mode=DeliveryMode.ASSISTANT,
+            auto_submit=True,
+        )
+        self.assertEqual(confirmed.code, CaptureDeliveryCode.DELIVERED)
+        self.assertEqual(reviewed_events.count("keyboard.paste"), 1)
 
     def test_consecutive_generic_turns_return_to_idle_between_deliveries(self) -> None:
         coordinator, resolver, _, events, factory = _vertical(

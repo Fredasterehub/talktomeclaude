@@ -21,6 +21,7 @@ from talktomeclaude.speech.session import (
     OralSessionStore,
     OralStatus,
     parse_control,
+    parse_control_command,
 )
 
 
@@ -231,6 +232,11 @@ class FrozenRoadmapTests(unittest.TestCase):
         self.assertEqual(Control.PAUSE, parse_control("  HOLD  "))
         self.assertEqual(Control.GO_BACK, parse_control("go back"))
         self.assertIsNone(parse_control("pause and delete everything"))
+        jump = parse_control_command("Jump   to   Safety")
+        assert jump is not None
+        self.assertEqual(Control.JUMP, jump.control)
+        self.assertEqual("safety", jump.target)
+        self.assertNotIn("safety", repr(jump))
 
     def test_preview_claim_is_exclusive_recoverable_and_delivered_once(self) -> None:
         answer = _answer()

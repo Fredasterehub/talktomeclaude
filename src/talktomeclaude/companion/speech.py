@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from talktomeclaude.reply import ReplyEvent
 from talktomeclaude.speech import (
     CanonicalSpeechController,
+    Control,
+    ControlCommand,
+    NavigationResult,
     OralSessionStore,
+    OralSessionError,
     OralStatus,
     PersistentSpeechRuntime,
     SoundDevicePlayback,
@@ -18,6 +23,14 @@ from talktomeclaude.speech import (
     SynthesisWorker,
     production_synthesis_worker,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechControlOutcome:
+    """Content-free result for companion lifecycle routing."""
+
+    applied: bool
+    speaking: bool
 
 
 class _OfferQueue(Protocol):
@@ -72,6 +85,16 @@ class _MuteGate:
 class CompanionSpeech:
     """Own one selected voice and bridge whole-answer completion to runtime."""
 
+    _INFORMATIONAL_CONTROLS = frozenset(
+        {
+            Control.TOPICS,
+            Control.SUMMARIZE,
+            Control.DEEPER,
+            Control.WHERE,
+            Control.HELP,
+        }
+    )
+
     def __init__(
         self,
         controller: CanonicalSpeechController,
@@ -89,6 +112,10 @@ class CompanionSpeech:
         self._active_answer_id: str | None = None
         self._lock = threading.RLock()
         self._closed = False
+        self._control_sequence = 0
+        self._control_unit_ids: set[str] = set()
+        self._control_resume_ids: set[str] = set()
+        self._last_interrupted_answer_id: str | None = None
 
     @classmethod
     def create(
@@ -131,8 +158,10 @@ class CompanionSpeech:
         with self._lock:
             if self._closed:
                 raise RuntimeError("speech presentation is closed")
+            self._discard_control_responses_locked()
             self._controller.accept(event)
             self._active_answer_id = event.event_id
+            self._last_interrupted_answer_id = None
 
     def set_muted(self, muted: bool) -> None:
         with self._lock:
@@ -140,6 +169,8 @@ class CompanionSpeech:
                 return
             if muted:
                 self._gate.stop()
+                self._discard_control_responses_locked()
+                self._last_interrupted_answer_id = None
             self._gate.set_muted(muted)
 
     def continue_explicitly(self) -> None:
@@ -155,30 +186,149 @@ class CompanionSpeech:
             if self._closed:
                 return
             try:
-                self._controller.interrupt()
+                interrupted = self._controller.interrupt()
+                self._last_interrupted_answer_id = interrupted.answer_id
             except RuntimeError:
                 self._gate.stop()
+                self._last_interrupted_answer_id = None
+            self._discard_control_responses_locked()
             self._active_answer_id = None
+
+    def handle_control(self, command: ControlCommand) -> SpeechControlOutcome:
+        """Apply one accepted local control without exposing answer wording."""
+
+        with self._lock:
+            control = command.control
+            if self._closed or self._gate.muted or control is Control.VOICE_OFF:
+                return SpeechControlOutcome(False, False)
+
+            result: NavigationResult
+            resume_after_response = False
+            active_answer_id = self._session.active_answer_id()
+            try:
+                if active_answer_id is None:
+                    if control in {Control.CONTINUE, Control.KEEP_GOING}:
+                        result = self._controller.go_back()
+                    else:
+                        result = self._controller.go_back(
+                            schedule=False,
+                            skip_answer_id=(
+                                self._last_interrupted_answer_id
+                                if control is Control.GO_BACK
+                                else None
+                            ),
+                        )
+                    if control in self._INFORMATIONAL_CONTROLS:
+                        self._controller.pause()
+                        result = self._controller.navigate(
+                            control,
+                            target=command.target,
+                        )
+                    elif control not in {
+                        Control.GO_BACK,
+                        Control.CONTINUE,
+                        Control.KEEP_GOING,
+                    }:
+                        result = self._controller.navigate(
+                            control,
+                            target=command.target,
+                        )
+                else:
+                    if control is Control.GO_BACK:
+                        result = self._controller.go_back(schedule=False)
+                    elif control in self._INFORMATIONAL_CONTROLS:
+                        self._controller.pause()
+                        result = self._controller.navigate(
+                            control,
+                            target=command.target,
+                        )
+                    else:
+                        result = self._controller.navigate(
+                            control,
+                            target=command.target,
+                        )
+            except (OralSessionError, RuntimeError):
+                if (
+                    active_answer_id is None
+                    and self._session.active_answer_id() is not None
+                ):
+                    try:
+                        self._controller.interrupt()
+                    except (OralSessionError, RuntimeError):
+                        self._gate.stop()
+                    self._active_answer_id = None
+                return SpeechControlOutcome(False, False)
+
+            state = result.state
+            if state is not None and state.status in {
+                OralStatus.ACTIVE,
+                OralStatus.PAUSED,
+            }:
+                self._active_answer_id = state.roadmap.answer_id
+            else:
+                self._active_answer_id = None
+
+            response_offered = False
+            if result.response and (
+                control is Control.GO_BACK
+                or control in self._INFORMATIONAL_CONTROLS
+            ):
+                self._control_sequence += 1
+                unit_id = f"control-response-{self._control_sequence}"
+                response_offered = self._gate.offer(unit_id, result.response)
+                if response_offered:
+                    self._control_unit_ids.add(unit_id)
+                    resume_after_response = control is Control.GO_BACK
+                    if resume_after_response:
+                        self._control_resume_ids.add(unit_id)
+            if control is Control.GO_BACK and not response_offered:
+                self._controller.schedule_active()
+            self._last_interrupted_answer_id = None
+
+            return SpeechControlOutcome(
+                True,
+                response_offered
+                or (state is not None and state.status is OralStatus.ACTIVE),
+            )
 
     def stop(self) -> None:
         with self._lock:
             if not self._closed:
                 self._gate.stop()
+                self._discard_control_responses_locked()
+                self._last_interrupted_answer_id = None
 
     def _unit_completed(self, unit_id: str) -> bool:
         with self._lock:
             if self._closed:
                 return False
-            answer_id = self._active_answer_id
-            if answer_id is None or not self._controller.unit_completed(unit_id):
-                return False
-            state = self._session.restore(answer_id)
-            finished = state is not None and state.status is OralStatus.COMPLETE
-            if finished:
-                self._active_answer_id = None
+            if unit_id in self._control_unit_ids:
+                self._control_unit_ids.remove(unit_id)
+                resume = unit_id in self._control_resume_ids
+                self._control_resume_ids.discard(unit_id)
+                if resume:
+                    self._controller.schedule_active()
+                    return True
+                control_finished = True
+            else:
+                control_finished = False
+            if control_finished:
+                finished = True
+            else:
+                answer_id = self._active_answer_id
+                if answer_id is None or not self._controller.unit_completed(unit_id):
+                    return False
+                state = self._session.restore(answer_id)
+                finished = state is not None and state.status is OralStatus.COMPLETE
+                if finished:
+                    self._active_answer_id = None
         if finished:
             self._on_answer_finished()
         return True
+
+    def _discard_control_responses_locked(self) -> None:
+        self._control_unit_ids.clear()
+        self._control_resume_ids.clear()
 
     def shutdown(self) -> bool:
         with self._lock:
@@ -186,7 +336,9 @@ class CompanionSpeech:
                 return True
             self._closed = True
             self._gate.stop()
+            self._discard_control_responses_locked()
+            self._last_interrupted_answer_id = None
         return self._runtime.shutdown()
 
 
-__all__ = ["CompanionSpeech"]
+__all__ = ["CompanionSpeech", "SpeechControlOutcome"]

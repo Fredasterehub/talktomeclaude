@@ -22,10 +22,12 @@ from talktomeclaude.companion.runtime import (
     CompanionController,
     CompanionSurfaces,
 )
+from talktomeclaude.companion.speech import SpeechControlOutcome
 from talktomeclaude.core import RuntimePhase
 from talktomeclaude.diagnostics import DiagnosticStore
 from talktomeclaude.platform.contracts import DeliveryCode, DeliveryResult
 from talktomeclaude.reply import ReplyEvent
+from talktomeclaude.speech import Control, ControlCommand, parse_control_command
 
 
 class _Resolution:
@@ -104,12 +106,24 @@ class _Speech:
         self.stops = 0
         self.shutdowns = 0
         self.muted = False
+        self.controls: list[ControlCommand] = []
+        self.control_outcome = SpeechControlOutcome(False, False)
+        self.control_entered: threading.Event | None = None
+        self.control_gate: threading.Event | None = None
 
     def accept(self, event: ReplyEvent) -> None:
         self.events.append(event)
 
     def interrupt(self) -> None:
         self.interrupts += 1
+
+    def handle_control(self, command: ControlCommand) -> SpeechControlOutcome:
+        self.controls.append(command)
+        if self.control_entered is not None:
+            self.control_entered.set()
+        if self.control_gate is not None:
+            self.control_gate.wait(1)
+        return self.control_outcome
 
     def set_muted(self, muted: bool) -> None:
         self.muted = muted
@@ -161,7 +175,9 @@ class CompanionControllerTests(unittest.TestCase):
             snapshot_resolver=SnapshotCallableAdapter(self.injector.snapshot_target)
         )
         self.capture = CaptureDeliveryCoordinator(
-            self.capture_service, self.injector
+            self.capture_service,
+            self.injector,
+            control_parser=parse_control_command,
         )
         self.microphone = _Microphone(self.capture.add_audio)
         self.speech = _Speech()
@@ -169,6 +185,7 @@ class CompanionControllerTests(unittest.TestCase):
         self.workers = _QueuedWorkers()
         self.transcription: list[Any] = ["hello terminal", None]
         self.surface_calls: list[str] = []
+        self.persisted_mute: list[bool] = []
         self.controller = CompanionController(
             self.capture,
             self.microphone,
@@ -184,6 +201,7 @@ class CompanionControllerTests(unittest.TestCase):
             ),
             worker_starter=self.workers,
             shutdown_deadline_seconds=0.2,
+            persist_output_muted=self.persisted_mute.append,
         )
 
     def tearDown(self) -> None:
@@ -433,6 +451,78 @@ class CompanionControllerTests(unittest.TestCase):
         self.assertEqual(self.speech.interrupts, 1)
         self.assertEqual(self.microphone.started, 1)
         self.assertEqual(self.controller.snapshot.runtime.phase, RuntimePhase.RECORDING)
+
+    def test_local_control_routes_to_speech_without_terminal_effect(self) -> None:
+        event = ReplyEvent.create(
+            session="session-1",
+            event_id="reply-control",
+            answer="A reply with private topic wording.",
+        )
+        self.assertTrue(self.controller.receive_reply(event))
+        self.speech.control_outcome = SpeechControlOutcome(True, True)
+        self.transcription[:] = ["where were you", 0.99]
+
+        self.controller.dispatch(CompanionIntent(IntentKind.START_RECORDING))
+        self.microphone.emit(b"audio")
+        self.controller.dispatch(CompanionIntent(IntentKind.FINISH_RECORDING))
+        self.workers.run_next()
+
+        self.assertEqual(self.speech.interrupts, 1)
+        self.assertEqual(len(self.speech.controls), 1)
+        self.assertIs(self.speech.controls[0].control, Control.WHERE)
+        self.assertEqual(self.injector.deliveries, [])
+        self.assertIsNone(self.controller.pending_review)
+        snapshot = self.controller.snapshot
+        self.assertEqual(snapshot.runtime.phase, RuntimePhase.SPEAKING)
+        self.assertNotIn("where", snapshot.detail.casefold())
+        diagnostics = (self.root / "diagnostics.json").read_text(encoding="utf-8")
+        self.assertNotIn("where were you", diagnostics.casefold())
+        self.assertIn('"control_code": "where"', diagnostics)
+
+    def test_inflight_control_exclusively_owns_local_runtime_effects(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        self.speech.control_entered = entered
+        self.speech.control_gate = release
+        self.speech.control_outcome = SpeechControlOutcome(True, True)
+        self.transcription[:] = ["where were you", 0.99]
+        self.controller.dispatch(CompanionIntent(IntentKind.START_RECORDING))
+        self.microphone.emit(b"audio")
+        self.controller.dispatch(CompanionIntent(IntentKind.FINISH_RECORDING))
+
+        worker = threading.Thread(target=self.workers.run_next)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+
+        incoming = ReplyEvent.create(
+            session="session-race",
+            event_id="reply-race",
+            answer="durable reply retries after the local control",
+        )
+        self.assertFalse(self.controller.receive_reply(incoming))
+        with self.assertRaisesRegex(RuntimeError, "finish is already in progress"):
+            self.controller.dispatch(CompanionIntent(IntentKind.START_RECORDING))
+        self.assertEqual(self.controller.snapshot.runtime.phase, RuntimePhase.IDLE)
+        self.assertEqual(self.speech.events, [])
+
+        release.set()
+        worker.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.controller.snapshot.runtime.phase, RuntimePhase.SPEAKING)
+        self.assertEqual(self.microphone.started, 1)
+
+    def test_voice_off_control_mutes_and_persists_without_navigation(self) -> None:
+        self.transcription[:] = ["voice off", 0.99]
+        self.controller.dispatch(CompanionIntent(IntentKind.START_RECORDING))
+        self.microphone.emit(b"audio")
+        self.controller.dispatch(CompanionIntent(IntentKind.FINISH_RECORDING))
+        self.workers.run_next()
+
+        self.assertTrue(self.controller.snapshot.output_muted)
+        self.assertEqual(self.speech.controls, [])
+        self.assertEqual(self.speech.stops, 1)
+        self.assertEqual(self.persisted_mute, [True])
+        self.assertEqual(self.injector.deliveries, [])
 
     def test_start_background_and_quit_are_idempotent_and_bounded_at_seams(self) -> None:
         self.controller.start_background()

@@ -21,10 +21,12 @@ from talktomeclaude.companion.contracts import (
     CompanionSnapshot,
     IntentKind,
 )
+from talktomeclaude.companion.speech import SpeechControlOutcome
 from talktomeclaude.core import EventKind, RuntimeEvent, RuntimePhase
 from talktomeclaude.diagnostics import DiagnosticStore, opaque_identity
 from talktomeclaude.platform.contracts import DeliveryMode
 from talktomeclaude.reply import ReplyEvent
+from talktomeclaude.speech import Control, ControlCommand
 
 
 class MicrophoneBoundary(Protocol):
@@ -47,6 +49,8 @@ class SpeechPresentation(Protocol):
     def set_muted(self, muted: bool) -> None: ...
 
     def interrupt(self) -> None: ...
+
+    def handle_control(self, command: ControlCommand) -> SpeechControlOutcome: ...
 
     def stop(self) -> None: ...
 
@@ -255,6 +259,8 @@ class CompanionController:
             with self._lock:
                 if self._closing:
                     raise RuntimeError("companion is stopping")
+                if self._finish_inflight:
+                    raise RuntimeError("recording finish is already in progress")
                 phase = self._capture.runtime.state.phase
                 self._pending_review = None
                 capture_mode = self._capture_mode
@@ -353,6 +359,9 @@ class CompanionController:
             if self._closing:
                 return
             self._pending_review = result.transcript
+        if result.code is CaptureDeliveryCode.CONTROL:
+            self._capture_control_finished(result)
+            return
         details = {
             CaptureDeliveryCode.DELIVERED: "Transcript delivered; waiting for Claude",
             CaptureDeliveryCode.REVIEW_REQUIRED: "Review the transcript before delivery",
@@ -362,6 +371,45 @@ class CompanionController:
             CaptureDeliveryCode.DELIVERY_FAILED: "Delivery needs attention",
         }
         self._set_detail(details[result.code])
+        if self._diagnostics is not None:
+            self._diagnostics.record("capture_result", **result.diagnostics)
+        self._publish()
+
+    def _capture_control_finished(self, result: CaptureDeliveryResult) -> None:
+        raw_control = result.control
+        command = (
+            raw_control
+            if isinstance(raw_control, ControlCommand)
+            else ControlCommand(raw_control)
+            if isinstance(raw_control, Control)
+            else None
+        )
+        if self._cancel_event.is_set():
+            detail = "Capture cancelled"
+        elif command is None:
+            detail = "Voice control unavailable"
+        elif command.control is Control.VOICE_OFF:
+            self._set_output_muted(True)
+            detail = "Spoken output muted"
+        elif self._speech is None:
+            detail = "No spoken answer to control"
+        else:
+            outcome = self._speech.handle_control(command)
+            if outcome.speaking:
+                received = self._capture.runtime.dispatch(
+                    RuntimeEvent(EventKind.REPLY_RECEIVED)
+                )
+                planned = self._capture.runtime.dispatch(
+                    RuntimeEvent(EventKind.PLAN_READY)
+                )
+                if not received.accepted or not planned.accepted:
+                    raise RuntimeError("runtime rejected resumed speech control")
+                detail = "Speaking reply"
+            elif outcome.applied:
+                detail = "Voice control applied"
+            else:
+                detail = "No spoken answer to control"
+        self._set_detail(detail)
         if self._diagnostics is not None:
             self._diagnostics.record("capture_result", **result.diagnostics)
         self._publish()
@@ -409,20 +457,28 @@ class CompanionController:
 
     def _toggle_output_mute(self) -> CompanionSnapshot:
         with self._lock:
-            self._output_muted = not self._output_muted
-            muted = self._output_muted
+            muted = not self._output_muted
+        self._set_output_muted(muted)
+        self._set_detail("Spoken output muted" if muted else "Spoken output enabled")
+        return self._publish()
+
+    def _set_output_muted(self, muted: bool) -> None:
+        with self._lock:
+            changed = self._output_muted != muted
+            self._output_muted = muted
         if muted and self._speech is not None:
             self._speech.stop()
         if self._speech is not None:
             self._speech.set_muted(muted)
-        if self._persist_output_muted is not None:
+        if changed and self._persist_output_muted is not None:
             self._persist_output_muted(muted)
-        self._set_detail("Spoken output muted" if muted else "Spoken output enabled")
-        return self._publish()
 
     def receive_reply(self, event: ReplyEvent) -> bool:
         """Admit one durable reply and report whether its local effect committed."""
 
+        with self._lock:
+            if self._finish_inflight:
+                return False
         phase = self._capture.runtime.state.phase
         if phase not in {RuntimePhase.IDLE, RuntimePhase.WAITING_FOR_CLAUDE}:
             return False

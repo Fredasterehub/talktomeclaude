@@ -170,22 +170,38 @@ class CanonicalSpeechController:
             self._active_answer_id = None
             return InterruptionResult(answer_id, parked)
 
-    def go_back(self) -> NavigationResult:
+    def go_back(
+        self,
+        *,
+        schedule: bool = True,
+        skip_answer_id: str | None = None,
+    ) -> NavigationResult:
         with self._lock:
-            result = self._session.go_back()
+            result = self._session.go_back(skip_answer_id=skip_answer_id)
             assert result.state is not None
             self._active_answer_id = result.state.roadmap.answer_id
             self._offered_unit_ids.clear()
-            self._schedule_locked(result.state)
+            if schedule:
+                self._schedule_locked(result.state)
             return result
+
+    def schedule_active(self) -> int:
+        """Schedule the durable active cursor after a control response."""
+
+        with self._lock:
+            answer_id = self._require_active_locked()
+            state = self._session.restore(answer_id)
+            if state is None:
+                raise RuntimeError("active oral answer state is missing")
+            return self._schedule_locked(state)
 
     def navigate(
         self, control: Control, *, target: str | None = None
     ) -> NavigationResult:
         with self._lock:
-            answer_id = self._require_active_locked()
             if control is Control.GO_BACK:
                 return self.go_back()
+            answer_id = self._require_active_locked()
             if control in {
                 Control.BACK,
                 Control.NEXT,

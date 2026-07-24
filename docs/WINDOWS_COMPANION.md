@@ -84,6 +84,20 @@ talktomeclaude config set assistant-auto-submit off   # or on
 talktomeclaude config set recording-mode push-toggle # or push-to-talk
 ```
 
+## Spoken reply controls
+
+While a reply is speaking, start a new recording to stop and park it immediately.
+An accepted exact control such as `pause`, `continue`, `repeat`, `back`, `next`,
+`topics`, `summarize`, `where were you`, `go back`, `keep going`, `stop talking`,
+`voice off`, `help`, or `jump to <topic>` is handled locally. It is not copied,
+pasted, submitted to Claude, or allowed to reuse the finish-time terminal snapshot.
+`go back` speaks a short recap before resuming the parked answer.
+
+Only normal-confidence assistant input takes this local path. Generic dictation is
+always delivered as dictation, while low-confidence, edited, safety-stop, and recovery
+text remains in the explicit review flow and is never silently reinterpreted as a
+control.
+
 ## Voice settings and import
 
 Open **Voice** to see bundled and registered voices with written

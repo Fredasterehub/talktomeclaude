@@ -75,12 +75,30 @@ _CONTROL_SYNONYMS: Mapping[Control, frozenset[str]] = {
 }
 
 
-def parse_control(text: str) -> Control | None:
+@dataclass(frozen=True, slots=True)
+class ControlCommand:
+    """A deterministic control plus optional content-bearing topic target."""
+
+    control: Control
+    target: str | None = field(default=None, repr=False)
+
+
+def parse_control_command(text: str) -> ControlCommand | None:
     normalized = " ".join(text.casefold().strip().split())
     for control, synonyms in _CONTROL_SYNONYMS.items():
         if normalized in synonyms:
-            return control
+            return ControlCommand(control)
+    jump_prefix = "jump to "
+    if normalized.startswith(jump_prefix):
+        target = normalized[len(jump_prefix) :].strip()
+        if target:
+            return ControlCommand(Control.JUMP, target)
     return None
+
+
+def parse_control(text: str) -> Control | None:
+    command = parse_control_command(text)
+    return command.control if command is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -619,7 +637,7 @@ class OralSessionStore:
             text = text[: MAX_RECAP_CHARS - 1].rstrip() + "…"
         return text
 
-    def go_back(self) -> NavigationResult:
+    def go_back(self, *, skip_answer_id: str | None = None) -> NavigationResult:
         result: list[NavigationResult] = []
 
         def update(current: dict[str, Any]) -> dict[str, Any]:
@@ -628,6 +646,10 @@ class OralSessionStore:
             if not history:
                 raise OralSessionError("there is no parked answer")
             target_id = history.pop()
+            skipped_id = None
+            if target_id == skip_answer_id and history:
+                skipped_id = target_id
+                target_id = history.pop()
             target_record = root["answers"].get(target_id)
             if not isinstance(target_record, dict):
                 raise OralSessionError("parked answer state is missing")
@@ -646,6 +668,9 @@ class OralSessionStore:
                 )
                 history[:] = [item for item in history if item != active_id]
                 history.append(active_id)
+            if skipped_id is not None:
+                history[:] = [item for item in history if item != skipped_id]
+                history.append(skipped_id)
             target_state = _state_from_record(target_record)
             restored = replace(target_state, status=OralStatus.ACTIVE)
             root["answers"][target_id] = _record(
@@ -791,6 +816,7 @@ class OralSessionStore:
 
 __all__ = [
     "Control",
+    "ControlCommand",
     "FreezeResult",
     "FrozenAnswerState",
     "MAX_RECAP_CHARS",
@@ -801,4 +827,5 @@ __all__ = [
     "PreviewClaim",
     "PreviewEffectState",
     "parse_control",
+    "parse_control_command",
 ]
