@@ -12,12 +12,15 @@ import multiprocessing
 import importlib
 import os
 import queue
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from multiprocessing.connection import Listener
 from pathlib import Path
 from typing import Any
 from typing import Generic, Protocol, TypeVar
@@ -218,6 +221,31 @@ def _bounded_wait(worker: SynthesisWorker, deadline_seconds: float) -> bool:
     )
 
 
+def _reap_worker(
+    worker: SynthesisWorker, deadline_seconds: float
+) -> tuple[bool, bool, bool]:
+    """Reserve part of one deadline for forced termination and final reap."""
+
+    started = time.monotonic()
+    force_at = started + (deadline_seconds * 0.6)
+    final = started + deadline_seconds
+    terminate_budget = min(
+        deadline_seconds * 0.1,
+        max(0.0, force_at - time.monotonic()),
+    )
+    terminate_sent = _bounded_action(worker.terminate, terminate_budget)
+    reaped = _bounded_wait(worker, max(0.0, force_at - time.monotonic()))
+    if reaped:
+        return terminate_sent, False, True
+    kill_budget = min(
+        deadline_seconds * 0.1,
+        max(0.0, final - time.monotonic()),
+    )
+    kill_sent = _bounded_action(worker.kill, kill_budget)
+    reaped = _bounded_wait(worker, max(0.0, final - time.monotonic()))
+    return terminate_sent, kill_sent, reaped
+
+
 def _bounded_create(
     factory: Callable[[str], SynthesisWorker],
     selected_voice: str,
@@ -325,17 +353,9 @@ class PersistentSpeechRuntime:
                 kill_sent = False
                 reaped = True
             else:
-                terminate_sent = _bounded_action(
-                    old_worker.terminate, remaining()
+                terminate_sent, kill_sent, reaped = _reap_worker(
+                    old_worker, remaining() * 0.5
                 )
-                reaped = _bounded_wait(old_worker, remaining())
-                if not reaped:
-                    kill_sent = _bounded_action(
-                        old_worker.kill, remaining()
-                    )
-                    reaped = _bounded_wait(old_worker, remaining())
-                else:
-                    kill_sent = False
             if not reaped:
                 raise SpeechRuntimeError("speech worker could not be reaped")
             self._worker = None
@@ -380,11 +400,7 @@ class PersistentSpeechRuntime:
             def remaining() -> float:
                 return max(0.0, deadline - time.monotonic())
 
-            _bounded_action(worker.terminate, remaining())
-            reaped = _bounded_wait(worker, remaining())
-            if not reaped:
-                _bounded_action(worker.kill, remaining())
-                reaped = _bounded_wait(worker, remaining())
+            _, _, reaped = _reap_worker(worker, remaining())
             if reaped:
                 self._worker = None
             return reaped
@@ -414,10 +430,12 @@ def _synthesis_process_main(
     requests: Any,
     replies: Any,
     stopping: Any,
+    ready: Any,
     synthesize_fn: Callable[[str, Path, str], None],
 ) -> None:
     root = Path(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
+    ready.set()
     while not stopping.is_set():
         try:
             job = requests.get(timeout=0.1)
@@ -461,9 +479,12 @@ class SpawnSynthesisWorker:
             [str, Path, str], None
         ] = _production_synthesize,
         start_method: str = "spawn",
+        startup_deadline_seconds: float = 1.5,
     ) -> None:
         if queue_capacity < 1:
             raise ValueError("synthesis queue capacity must be positive")
+        if startup_deadline_seconds <= 0:
+            raise ValueError("synthesis startup deadline must be positive")
         self.selected_voice = selected_voice
         context: Any = multiprocessing.get_context(start_method)
         self._context = context
@@ -477,6 +498,7 @@ class SpawnSynthesisWorker:
         self._requests = self._context.Queue(maxsize=queue_capacity)
         self._replies = self._context.Queue(maxsize=queue_capacity)
         self._stopping = self._context.Event()
+        self._ready = self._context.Event()
         self._callbacks: dict[str, tuple[SynthesisRequest, SynthesisCallback]] = {}
         self._callbacks_lock = threading.Lock()
         self._artifacts: set[Path] = set()
@@ -490,12 +512,28 @@ class SpawnSynthesisWorker:
                 self._requests,
                 self._replies,
                 self._stopping,
+                self._ready,
                 synthesize_fn,
             ),
             name="talktomeclaude-speech-synthesizer",
             daemon=True,
         )
         self._process.start()
+        if not self._ready.wait(startup_deadline_seconds):
+            reap_timeout = min(max(startup_deadline_seconds, 0.05), 0.25)
+            self._stopping.set()
+            self._process.terminate()
+            self._process.join(reap_timeout)
+            if self._process.is_alive() and hasattr(self._process, "kill"):
+                self._process.kill()
+                self._process.join(reap_timeout)
+            if not self._process.is_alive():
+                with self._callbacks_lock:
+                    self._process_exited = True
+                self._cleanup_unclaimed()
+            raise SpeechRuntimeError(
+                "speech synthesis process did not become ready"
+            )
         self._pump = threading.Thread(
             target=self._pump_replies,
             name="ttc-speech-result-pump",
@@ -533,6 +571,21 @@ class SpawnSynthesisWorker:
             try:
                 reply = self._replies.get(timeout=0.05)
             except queue.Empty:
+                if not self._process.is_alive():
+                    with self._callbacks_lock:
+                        abandoned = tuple(self._callbacks.values())
+                        self._callbacks.clear()
+                        self._process_exited = True
+                    for request, callback in abandoned:
+                        try:
+                            callback(
+                                SynthesisResult.failed(
+                                    request, SpeechFaultCode.SYNTHESIS_FAILED
+                                )
+                            )
+                        except Exception:
+                            pass
+                    return
                 continue
             if not isinstance(reply, _ProcessReply):
                 continue
@@ -607,3 +660,308 @@ class SpawnSynthesisWorker:
                 self._root.rmdir()
             except OSError:
                 pass
+
+
+class SubprocessSynthesisWorker:
+    """Fixed-voice worker hosted by an ordinary hidden ``python -m`` process."""
+
+    def __init__(
+        self,
+        selected_voice: str,
+        *,
+        queue_capacity: int = 2,
+        artifact_root: str | os.PathLike[str] | None = None,
+        startup_deadline_seconds: float = 1.5,
+        worker_module: str = "talktomeclaude.speech.subprocess_worker",
+    ) -> None:
+        if os.name != "nt":
+            raise SpeechRuntimeError("subprocess synthesis worker requires Windows")
+        if queue_capacity < 1:
+            raise ValueError("synthesis queue capacity must be positive")
+        if startup_deadline_seconds <= 0:
+            raise ValueError("synthesis startup deadline must be positive")
+        self.selected_voice = selected_voice
+        self._queue_capacity = queue_capacity
+        self._owns_root = artifact_root is None
+        self._root = Path(
+            tempfile.mkdtemp(prefix="talktomeclaude-speech-")
+            if artifact_root is None
+            else artifact_root
+        ).resolve()
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._callbacks: dict[
+            str, tuple[SynthesisRequest, SynthesisCallback]
+        ] = {}
+        self._callbacks_lock = threading.Lock()
+        self._send_lock = threading.Lock()
+        self._artifacts: set[Path] = set()
+        self._process_exited = False
+        self._stopping = threading.Event()
+        self._pump_stop = threading.Event()
+
+        address = rf"\\.\pipe\talktomeclaude-speech-{uuid.uuid4().hex}"
+        authkey = uuid.uuid4().bytes + uuid.uuid4().bytes
+        try:
+            listener: Any = Listener(address, family="AF_PIPE", authkey=authkey)
+        except OSError as exc:
+            self._cleanup_failed_startup_root()
+            raise SpeechRuntimeError(
+                "speech synthesis pipe could not start"
+            ) from exc
+        environment = os.environ.copy()
+        environment["TTC_SYNTHESIS_PIPE"] = address
+        environment["TTC_SYNTHESIS_AUTHKEY"] = authkey.hex()
+        try:
+            self._process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    worker_module,
+                    selected_voice,
+                    str(self._root),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=environment,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, ValueError) as exc:
+            listener.close()
+            self._cleanup_failed_startup_root()
+            raise SpeechRuntimeError(
+                "speech synthesis subprocess could not start"
+            ) from exc
+        accepted: list[Any] = []
+        accept_done = threading.Event()
+
+        def accept_connection() -> None:
+            try:
+                accepted.append(listener.accept())
+            except (EOFError, OSError):
+                pass
+            finally:
+                listener.close()
+                accept_done.set()
+
+        accept_thread = threading.Thread(
+            target=accept_connection,
+            name="ttc-speech-pipe-accept",
+            daemon=True,
+        )
+        accept_thread.start()
+        deadline = time.monotonic() + startup_deadline_seconds
+        remaining = max(0.0, deadline - time.monotonic())
+        if not accept_done.wait(remaining) or not accepted:
+            listener.close()
+            self._reap_failed_startup(startup_deadline_seconds)
+            raise SpeechRuntimeError("speech synthesis subprocess did not connect")
+        self._connection = accepted[0]
+        remaining = max(0.0, deadline - time.monotonic())
+        try:
+            ready = (
+                self._connection.recv()
+                if self._connection.poll(remaining)
+                else None
+            )
+        except (EOFError, OSError):
+            ready = None
+        if ready != {"kind": "ready"}:
+            self._connection.close()
+            self._reap_failed_startup(startup_deadline_seconds)
+            raise SpeechRuntimeError("speech synthesis subprocess did not become ready")
+        self._pump = threading.Thread(
+            target=self._pump_replies,
+            name="ttc-speech-subprocess-result-pump",
+            daemon=True,
+        )
+        self._pump.start()
+
+    def _reap_failed_startup(self, deadline_seconds: float) -> None:
+        reap_timeout = min(max(deadline_seconds, 0.05), 0.25)
+        if self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(reap_timeout)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+                try:
+                    self._process.wait(reap_timeout)
+                except subprocess.TimeoutExpired:
+                    pass
+        self._cleanup_failed_startup_root()
+
+    def _cleanup_failed_startup_root(self) -> None:
+        if self._owns_root:
+            try:
+                self._root.rmdir()
+            except OSError:
+                pass
+
+    def submit(self, request: SynthesisRequest, callback: SynthesisCallback) -> None:
+        if self._stopping.is_set() or self._process.poll() is not None:
+            raise SpeechRuntimeError("speech synthesis subprocess is unavailable")
+        job_id = uuid.uuid4().hex
+        with self._callbacks_lock:
+            if len(self._callbacks) >= self._queue_capacity:
+                raise SpeechRuntimeError("speech synthesis queue is full")
+            self._callbacks[job_id] = (request, callback)
+        try:
+            with self._send_lock:
+                self._connection.send(
+                    {
+                        "kind": "synthesize",
+                        "job_id": job_id,
+                        "text": request.text,
+                    }
+                )
+        except (EOFError, OSError) as exc:
+            with self._callbacks_lock:
+                self._callbacks.pop(job_id, None)
+            raise SpeechRuntimeError("speech synthesis submission failed") from exc
+
+    def _discard_path(self, payload: object) -> None:
+        if isinstance(payload, Path):
+            payload.unlink(missing_ok=True)
+            with self._callbacks_lock:
+                self._artifacts.discard(payload)
+                can_remove_root = self._process_exited and not self._artifacts
+            if self._owns_root and can_remove_root:
+                try:
+                    self._root.rmdir()
+                except OSError:
+                    pass
+
+    def _fail_pending(self) -> None:
+        with self._callbacks_lock:
+            abandoned = tuple(self._callbacks.values())
+            self._callbacks.clear()
+            self._process_exited = True
+        for request, callback in abandoned:
+            try:
+                callback(
+                    SynthesisResult.failed(
+                        request, SpeechFaultCode.SYNTHESIS_FAILED
+                    )
+                )
+            except Exception:
+                pass
+
+    def _pump_replies(self) -> None:
+        while not self._pump_stop.is_set():
+            try:
+                available = self._connection.poll(0.05)
+            except (EOFError, OSError):
+                self._fail_pending()
+                return
+            if not available:
+                if self._process.poll() is not None:
+                    self._fail_pending()
+                    return
+                continue
+            try:
+                reply = self._connection.recv()
+            except (EOFError, OSError):
+                self._fail_pending()
+                return
+            if not isinstance(reply, dict) or reply.get("kind") != "reply":
+                continue
+            job_id = reply.get("job_id")
+            if not isinstance(job_id, str):
+                continue
+            with self._callbacks_lock:
+                owned = self._callbacks.pop(job_id, None)
+            artifact_path = reply.get("artifact_path")
+            candidate = self._owned_reply_path(job_id, artifact_path)
+            if owned is None:
+                if candidate is not None:
+                    candidate.unlink(missing_ok=True)
+                continue
+            request, callback = owned
+            artifact: SpeechArtifact | None = None
+            valid_path = bool(
+                candidate is not None
+                and candidate.is_file()
+                and candidate.stat().st_size > 0
+            )
+            if reply.get("succeeded") is True and valid_path:
+                assert candidate is not None
+                with self._callbacks_lock:
+                    self._artifacts.add(candidate)
+                artifact = SpeechArtifact(
+                    generation=request.generation,
+                    unit_id=request.unit_id,
+                    payload=candidate,
+                    discard=self._discard_path,
+                )
+                result = SynthesisResult.ready(request, artifact)
+            else:
+                if candidate is not None:
+                    candidate.unlink(missing_ok=True)
+                result = SynthesisResult.failed(
+                    request, SpeechFaultCode.SYNTHESIS_FAILED
+                )
+            try:
+                callback(result)
+            except Exception:
+                if artifact is not None:
+                    artifact.discard()
+
+    def _owned_reply_path(self, job_id: str, raw_path: object) -> Path | None:
+        if not isinstance(raw_path, str):
+            return None
+        try:
+            candidate = Path(raw_path).resolve()
+            expected = (self._root / f"{job_id}.wav").resolve()
+        except OSError:
+            return None
+        return candidate if candidate == expected else None
+
+    def terminate(self) -> None:
+        if self._stopping.is_set():
+            return
+        self._stopping.set()
+        try:
+            with self._send_lock:
+                self._connection.send({"kind": "stop"})
+        except (EOFError, OSError):
+            pass
+
+    def kill(self) -> None:
+        if self._process.poll() is None:
+            self._process.kill()
+
+    def wait(self, timeout: float) -> int | None:
+        try:
+            returncode = self._process.wait(timeout)
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("speech synthesis subprocess did not exit") from exc
+        self._pump_stop.set()
+        self._connection.close()
+        self._pump.join(min(max(timeout, 0.0), 0.1))
+        self._fail_pending()
+        self._cleanup_unclaimed()
+        return returncode
+
+    def _cleanup_unclaimed(self) -> None:
+        with self._callbacks_lock:
+            self._callbacks.clear()
+            claimed = set(self._artifacts)
+        for path in self._root.glob(".*.tmp.wav"):
+            path.unlink(missing_ok=True)
+        for path in self._root.glob("*.wav"):
+            if path not in claimed:
+                path.unlink(missing_ok=True)
+        if self._owns_root and not claimed:
+            try:
+                self._root.rmdir()
+            except OSError:
+                pass
+
+
+def production_synthesis_worker(selected_voice: str) -> SynthesisWorker:
+    """Choose the production process boundary for the active platform."""
+
+    if os.name == "nt":
+        return SubprocessSynthesisWorker(selected_voice)
+    return SpawnSynthesisWorker(selected_voice)

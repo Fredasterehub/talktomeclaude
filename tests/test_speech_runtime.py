@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from talktomeclaude.speech.runtime import (
     PersistentSpeechRuntime,
     SpawnSynthesisWorker,
+    SubprocessSynthesisWorker,
     SpeechArtifact,
     SpeechFaultCode,
     SpeechRuntimeError,
@@ -62,6 +65,21 @@ class _Worker:
         return 0
 
 
+class _KillRequiredWorker(_Worker):
+    def __init__(self) -> None:
+        super().__init__()
+        self._killed = threading.Event()
+
+    def kill(self) -> None:
+        super().kill()
+        self._killed.set()
+
+    def wait(self, timeout: float) -> int:
+        if not self._killed.wait(timeout):
+            raise TimeoutError
+        return 0
+
+
 class PersistentSpeechRuntimeTests(unittest.TestCase):
     def test_persistent_boundary_submits_without_exposing_text_or_switching_voice(
         self,
@@ -112,6 +130,38 @@ class PersistentSpeechRuntimeTests(unittest.TestCase):
         self.assertFalse(result.boundary_replacement_required)
         self.assertEqual(workers[0].terminated, 1)
         self.assertEqual(workers[0].killed, 0)
+
+    def test_restart_reserves_time_to_kill_reap_and_replace_worker(self) -> None:
+        workers: list[_Worker] = []
+        voices: list[str] = []
+
+        def factory(voice: str) -> _Worker:
+            voices.append(voice)
+            worker: _Worker = _KillRequiredWorker() if not workers else _Worker()
+            workers.append(worker)
+            return worker
+
+        runtime = PersistentSpeechRuntime(
+            "rick", factory, shutdown_deadline_seconds=0.2
+        )
+        result = runtime.restart(object())
+
+        self.assertTrue(result.old_worker_reaped)
+        self.assertTrue(result.kill_sent)
+        self.assertEqual(workers[0].killed, 1)
+        self.assertEqual(voices, ["rick", "rick"])
+
+    def test_shutdown_reserves_time_for_forced_kill_and_final_reap(self) -> None:
+        worker = _KillRequiredWorker()
+        runtime = PersistentSpeechRuntime(
+            "rick", lambda _voice: worker, shutdown_deadline_seconds=0.1
+        )
+        started = time.monotonic()
+
+        self.assertTrue(runtime.shutdown())
+
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertEqual(worker.killed, 1)
 
     def test_noncooperative_worker_is_bounded_unavailable_and_never_replaced(self) -> None:
         workers: list[_Worker] = []
@@ -270,6 +320,25 @@ class PersistentSpeechRuntimeTests(unittest.TestCase):
             worker.terminate()
             worker.wait(5)
 
+    def test_spawn_worker_rejects_non_positive_startup_deadline(self) -> None:
+        with self.assertRaisesRegex(ValueError, "startup deadline"):
+            SpawnSynthesisWorker("rick", startup_deadline_seconds=0)
+
+    def test_spawn_startup_timeout_reaps_process_and_removes_owned_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            owned_root = Path(directory) / "owned-speech-root"
+            with mock.patch(
+                "talktomeclaude.speech.runtime.tempfile.mkdtemp",
+                return_value=str(owned_root),
+            ):
+                with self.assertRaisesRegex(SpeechRuntimeError, "did not become ready"):
+                    SpawnSynthesisWorker(
+                        "rick",
+                        synthesize_fn=_fake_spawn_synthesize,
+                        startup_deadline_seconds=0.000001,
+                    )
+            self.assertFalse(owned_root.exists())
+
     def test_spawn_worker_failure_removes_partial_temp_and_returns_content_free_fault(
         self,
     ) -> None:
@@ -294,6 +363,78 @@ class PersistentSpeechRuntimeTests(unittest.TestCase):
             self.assertEqual(tuple(Path(directory).iterdir()), ())
             worker.terminate()
             worker.wait(5)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named-pipe worker")
+    def test_subprocess_worker_synthesizes_and_cleans_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worker = SubprocessSynthesisWorker(
+                "rick",
+                artifact_root=directory,
+                worker_module="tests.synthesis_subprocess_fixture",
+            )
+            outside = Path(directory).parent / "outside.wav"
+            self.assertIsNone(worker._owned_reply_path("job", str(outside)))
+            self.assertEqual(
+                worker._owned_reply_path("job", str(Path(directory) / "job.wav")),
+                (Path(directory) / "job.wav").resolve(),
+            )
+            request = SynthesisRequest(7, "pipe-unit", "Unicode café — 漢字 🚀")
+            results: list[SynthesisResult] = []
+            ready = threading.Event()
+            worker.submit(request, lambda result: (results.append(result), ready.set()))
+
+            self.assertTrue(ready.wait(10))
+            artifact = results[0].artifact
+            assert artifact is not None
+            path = artifact.payload
+            self.assertIsInstance(path, Path)
+            assert isinstance(path, Path)
+            self.assertEqual(
+                path.read_bytes(), "rick|Unicode café — 漢字 🚀".encode()
+            )
+            artifact.discard()
+            worker.terminate()
+            self.assertEqual(worker.wait(5), 0)
+            self.assertEqual(tuple(Path(directory).iterdir()), ())
+
+    @unittest.skipUnless(os.name == "nt", "Windows named-pipe worker")
+    def test_subprocess_death_fails_pending_callback_without_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worker = SubprocessSynthesisWorker(
+                "rick",
+                artifact_root=directory,
+                worker_module="tests.synthesis_subprocess_fixture",
+            )
+            request = SynthesisRequest(8, "blocked-unit", "BLOCK SECRET answer")
+            results: list[SynthesisResult] = []
+            ready = threading.Event()
+            worker.submit(request, lambda result: (results.append(result), ready.set()))
+            time.sleep(0.1)
+            worker.kill()
+
+            self.assertTrue(ready.wait(5))
+            self.assertEqual(results[0].fault, SpeechFaultCode.SYNTHESIS_FAILED)
+            self.assertNotIn("SECRET", repr(results[0]))
+            worker.wait(5)
+
+    @unittest.skipUnless(os.name == "nt", "Windows named-pipe worker")
+    def test_subprocess_immediate_wait_does_not_drop_pending_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            worker = SubprocessSynthesisWorker(
+                "rick",
+                artifact_root=directory,
+                worker_module="tests.synthesis_subprocess_fixture",
+            )
+            request = SynthesisRequest(9, "immediate-wait", "BLOCK SECRET answer")
+            results: list[SynthesisResult] = []
+            worker.submit(request, results.append)
+
+            worker.kill()
+            worker.wait(5)
+
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].fault, SpeechFaultCode.SYNTHESIS_FAILED)
+            self.assertNotIn("SECRET", repr(results[0]))
 
 
 if __name__ == "__main__":

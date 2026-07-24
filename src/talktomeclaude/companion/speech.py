@@ -14,8 +14,9 @@ from talktomeclaude.speech import (
     OralStatus,
     PersistentSpeechRuntime,
     SoundDevicePlayback,
-    SpawnSynthesisWorker,
     SpeechPipeline,
+    SynthesisWorker,
+    production_synthesis_worker,
 )
 
 
@@ -97,7 +98,7 @@ class CompanionSpeech:
         *,
         on_answer_finished: Callable[[], None],
         initially_muted: bool = False,
-        worker_factory: Callable[[str], SpawnSynthesisWorker] = SpawnSynthesisWorker,
+        worker_factory: Callable[[str], SynthesisWorker] = production_synthesis_worker,
         playback: SoundDevicePlayback | None = None,
     ) -> "CompanionSpeech":
         """Build the callback cycle without exposing partially initialized owners."""

@@ -316,6 +316,11 @@ class OralSessionStore:
             phase_hook=phase_hook,
         )
 
+    def active_answer_id(self) -> str | None:
+        """Return the durable active answer without exposing its content."""
+
+        return _root(self._transaction.read())["active_answer_id"]
+
     def freeze(self, answer: CanonicalAnswer, candidate: OralRoadmap) -> FreezeResult:
         """Compare-and-set one immutable roadmap; an existing winner is restored."""
 

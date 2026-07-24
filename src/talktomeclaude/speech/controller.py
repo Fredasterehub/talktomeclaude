@@ -63,6 +63,14 @@ class CanonicalSpeechController:
         answer = canonicalize(event.event_id, event.answer)
         candidate = deterministic_plan(answer)
         with self._lock:
+            prior_answer_id = self._session.active_answer_id()
+            if prior_answer_id is not None and prior_answer_id != event.event_id:
+                stopped = self._pipeline.stop()
+                if getattr(stopped, "silence_confirmed", True) is not True:
+                    raise RuntimeError("prior speech could not stop safely")
+                self._offered_unit_ids.clear()
+                self._session.park_for_interruption(prior_answer_id)
+                self._active_answer_id = None
             frozen = self._session.freeze(answer, candidate)
             state = frozen.state
             if self._active_answer_id != event.event_id:

@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from talktomeclaude.reply import ReplyEvent
@@ -23,6 +24,7 @@ class _Pipeline:
         self.limit = 3
         self.events: list[str] = []
         self.effect_ids: set[str] = set()
+        self.silence_confirmed = True
 
     def offer(
         self,
@@ -56,7 +58,7 @@ class _Pipeline:
         self.events.append("stop")
         self.stops += 1
         self.offers.clear()
-        return object()
+        return SimpleNamespace(silence_confirmed=self.silence_confirmed)
 
 
 def _event(identity: str = "answer-1") -> ReplyEvent:
@@ -166,6 +168,48 @@ class SpeechControllerTests(unittest.TestCase):
         self.assertEqual(before.roadmap.to_dict(), after.roadmap.to_dict())
         self.assertEqual(before.cursor, after.cursor)
         self.assertNotIn(first_id, {item[0] for item in restarted_pipeline.offers})
+
+    def test_restart_parks_prior_active_answer_before_accepting_new_turn(self) -> None:
+        self.controller.accept(_event("answer-prior"))
+
+        restarted_pipeline = _Pipeline(self.path)
+        restarted_store = OralSessionStore(self.path)
+        restarted = CanonicalSpeechController(restarted_store, restarted_pipeline)
+        accepted = restarted.accept(_event("answer-new"))
+
+        prior = restarted_store.restore("answer-prior")
+        current = restarted_store.restore("answer-new")
+        assert prior is not None
+        assert current is not None
+        self.assertEqual(prior.status, OralStatus.PARKED)
+        self.assertEqual(current.status, OralStatus.ACTIVE)
+        self.assertTrue(accepted.roadmap_created)
+        self.assertGreater(accepted.units_scheduled, 0)
+        self.assertEqual(restarted_pipeline.events[0], "stop")
+
+        returned = restarted.go_back()
+        self.assertEqual(returned.state.status, OralStatus.ACTIVE)  # type: ignore[union-attr]
+        self.assertEqual(
+            returned.state.roadmap.answer_id, "answer-prior"  # type: ignore[union-attr]
+        )
+        parked_new = restarted_store.restore("answer-new")
+        assert parked_new is not None
+        self.assertEqual(parked_new.status, OralStatus.PARKED)
+
+    def test_new_turn_fails_closed_when_prior_speech_cannot_stop(self) -> None:
+        self.controller.accept(_event("answer-prior"))
+        restarted_pipeline = _Pipeline(self.path)
+        restarted_pipeline.silence_confirmed = False
+        restarted_store = OralSessionStore(self.path)
+        restarted = CanonicalSpeechController(restarted_store, restarted_pipeline)
+
+        with self.assertRaisesRegex(RuntimeError, "could not stop safely"):
+            restarted.accept(_event("answer-new"))
+
+        prior = restarted_store.restore("answer-prior")
+        self.assertIsNotNone(prior)
+        self.assertEqual(prior.status, OralStatus.ACTIVE)  # type: ignore[union-attr]
+        self.assertIsNone(restarted_store.restore("answer-new"))
 
     def test_interruption_stops_before_parking_and_never_autoresumes(self) -> None:
         self.controller.accept(_event())
